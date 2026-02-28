@@ -172,10 +172,17 @@ class CPCVValidator:
         # Compute PBO: fraction where IS rank doesn't persist OOS
         pbo = self._compute_pbo(is_scores, oos_scores)
 
+        mean_is = float(np.mean(is_scores)) if is_scores else 0.0
+        mean_oos = float(np.mean(oos_scores)) if oos_scores else 0.0
+        sharpe_degradation = 1.0 - (mean_oos / mean_is) if mean_is != 0 else 0.0
+
         return {
             "pbo": pbo,
             "is_scores": is_scores,
             "oos_scores": oos_scores,
+            "mean_is_sharpe": mean_is,
+            "mean_oos_sharpe": mean_oos,
+            "sharpe_degradation": sharpe_degradation,
             "n_combos": len(combos),
         }
 

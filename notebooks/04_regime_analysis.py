@@ -4,12 +4,16 @@
 Runs the strategy on each VIX regime slice independently, compares
 filtered vs unfiltered performance, and runs Monte Carlo simulation.
 
+Uses optimized params from config/strategy_a_params.json if available,
+and loads real VIX data from QuestDB.
+
 Usage:
-    uv run python notebooks/04_regime_analysis.py
+    uv run python notebooks/04_regime_analysis.py --bar-size 1min
     uv run python notebooks/04_regime_analysis.py --synthetic
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +27,15 @@ from backtesting.metrics import compute_all_metrics, annualized_sharpe
 from backtesting.monte_carlo import MonteCarloSimulator
 from config.constants import VIXRegime
 from strategies.mean_reversion import MESMeanReversionStrategy
+
+# Best params from optimization — long-only is the key improvement
+OPTIMIZED_PARAMS = {
+    "long_only": True,
+    "max_daily_losses": 3,
+    "max_daily_loss_dollars": 500.0,
+}
+
+PARAMS_FILE = Path(__file__).resolve().parent.parent / "config" / "strategy_a_params.json"
 
 ET = pytz.timezone("US/Eastern")
 
@@ -74,17 +87,40 @@ def generate_synthetic_vix(df: pd.DataFrame, seed: int = 42) -> pd.Series:
     return pd.Series(vix_vals, index=unique_dates, name="vix")
 
 
-def load_data(use_synthetic: bool) -> tuple:
+def load_vix_from_questdb() -> pd.Series:
+    """Load real VIX daily closes from QuestDB, return as date-indexed Series."""
+    from data.questdb_client import QuestDBClient
+    qdb = QuestDBClient()
+    vix_df = qdb.get_bars("VIX", "1day", limit=500_000)
+    if vix_df.empty:
+        return pd.Series(dtype=float, name="vix")
+    vix_series = pd.Series(
+        vix_df["close"].values,
+        index=vix_df.index.date,
+        name="vix",
+    )
+    return vix_series
+
+
+def load_data(use_synthetic: bool, bar_size: str = "5min") -> tuple:
     if use_synthetic:
         df = generate_synthetic_ohlcv()
         return df, generate_synthetic_vix(df)
     try:
         from data.questdb_client import QuestDBClient
         qdb = QuestDBClient()
-        df = qdb.get_bars("MES", "5min", limit=500_000)
+        df = qdb.get_bars("MES", bar_size, limit=500_000)
         if df.empty:
             raise RuntimeError("Empty")
-        return df, generate_synthetic_vix(df)
+        # Try real VIX first, fall back to synthetic
+        vix = load_vix_from_questdb()
+        if vix.empty:
+            print("  [WARN] No real VIX data in QuestDB, using synthetic VIX")
+            vix = generate_synthetic_vix(df)
+        else:
+            print(f"  Loaded real VIX data: {len(vix)} days, "
+                  f"range {vix.min():.1f}-{vix.max():.1f}")
+        return df, vix
     except Exception:
         df = generate_synthetic_ohlcv()
         return df, generate_synthetic_vix(df)
@@ -92,16 +128,28 @@ def load_data(use_synthetic: bool) -> tuple:
 
 # ── Run Strategy on Subset ───────────────────────────────────────────────
 
+def load_best_params() -> dict:
+    """Load base params from file, then overlay optimized params on top."""
+    base = {}
+    if PARAMS_FILE.exists():
+        with open(PARAMS_FILE) as f:
+            base = json.load(f)
+    # Always apply our optimized overrides
+    base.update(OPTIMIZED_PARAMS)
+    return base
+
+
 def run_on_subset(
     df: pd.DataFrame,
     vix_series: pd.Series,
     capital: float = 10_000.0,
+    params: dict = None,
 ) -> dict:
     """Run strategy on a data subset and return metrics + trades."""
     if len(df) < 100:
         return {"sharpe": 0.0, "n_trades": 0, "trades": []}
 
-    strat = MESMeanReversionStrategy(capital=capital)
+    strat = MESMeanReversionStrategy(capital=capital, params=params)
     strat.generate_signals(df, vix_series=vix_series)
 
     if len(strat.trades) < 2:
@@ -117,82 +165,113 @@ def run_on_subset(
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
-def main(use_synthetic: bool = False) -> dict:
+def _print_strat_line(label: str, strat, capital: float = 10_000.0):
+    """Print a single strategy result line."""
+    if len(strat.trades) < 2:
+        print(f"  {label:20s}: No trades")
+        return None
+    pnls = np.array([t.pnl for t in strat.trades])
+    equity = np.cumsum(np.concatenate([[capital], pnls]))
+    rets = np.diff(equity) / equity[:-1]
+    m = compute_all_metrics(rets, pnls, equity)
+    total_pnl = float(np.sum(pnls))
+    print(
+        f"  {label:20s}: Sharpe={m['sharpe']:+.3f}, "
+        f"MaxDD={m['max_drawdown']*100:.1f}%, "
+        f"Trades={m['total_trades']}, "
+        f"WinRate={m['win_rate']*100:.1f}%, "
+        f"PF={m['profit_factor']:.2f}, "
+        f"PnL=${total_pnl:+,.0f}"
+    )
+    return m
+
+
+def main(use_synthetic: bool = False, bar_size: str = "5min") -> dict:
     print("=" * 70)
     print("  Strategy A: VIX Regime Analysis")
     print("=" * 70)
 
-    df, vix_series = load_data(use_synthetic)
+    best_params = load_best_params()
+    df, vix_series = load_data(use_synthetic, bar_size)
     print(f"Data: {len(df)} bars, {len(set(df.index.date))} trading days")
+    print(f"Optimized params: { {k: v for k, v in best_params.items() if k in OPTIMIZED_PARAMS} }")
 
     # Map each bar to its VIX regime
     bar_dates = pd.Series(df.index.date, index=df.index)
     bar_vix = bar_dates.map(lambda d: vix_series.get(d, 20.0))
 
+    # Show VIX distribution
+    n_low = int((bar_vix < 15).sum())
+    n_mid = int(((bar_vix >= 15) & (bar_vix <= 25)).sum())
+    n_high = int(((bar_vix > 25) & (bar_vix <= 35)).sum())
+    n_extreme = int((bar_vix > 35).sum())
+    print(f"VIX distribution: LOW(<15)={n_low}, NORMAL(15-25)={n_mid}, "
+          f"HIGH(25-35)={n_high}, EXTREME(>35)={n_extreme} bars")
+
     regime_slices = {
         "VIX < 15": df[bar_vix < 15],
         "VIX 15-25": df[(bar_vix >= 15) & (bar_vix <= 25)],
-        "VIX > 25": df[bar_vix > 25],
+        "VIX 25-35": df[(bar_vix > 25) & (bar_vix <= 35)],
+        "VIX > 35": df[bar_vix > 35],
     }
 
-    # ── Per-Regime Metrics ──
+    # ── Per-Regime Metrics (with optimized params) ──
     print("\n" + "=" * 70)
+    print("  Per-Regime Performance (optimized params)")
     header = (
         f"  {'Regime':12s} {'Bars':>7} {'Trades':>7} {'Sharpe':>8} "
-        f"{'Sortino':>8} {'MaxDD':>7} {'WinRate':>8} {'PF':>6}"
+        f"{'Sortino':>8} {'MaxDD':>7} {'WinRate':>8} {'PF':>6} {'PnL':>9}"
     )
     print(header)
     print("  " + "-" * (len(header) - 2))
 
     regime_results = {}
     for label, subset in regime_slices.items():
-        result = run_on_subset(subset, vix_series)
+        result = run_on_subset(subset, vix_series, params=best_params)
         regime_results[label] = result
         nt = result.get("total_trades", result.get("n_trades", 0))
+        trades_list = result.get("trades", [])
+        total_pnl = sum(t.pnl for t in trades_list) if trades_list else 0.0
         print(
             f"  {label:12s} {len(subset):7d} {nt:7d} "
             f"{result.get('sharpe', 0):8.3f} "
             f"{result.get('sortino', 0):8.3f} "
             f"{result.get('max_drawdown', 0) * 100:6.1f}% "
             f"{result.get('win_rate', 0) * 100:7.1f}% "
-            f"{result.get('profit_factor', 0):6.2f}"
+            f"{result.get('profit_factor', 0):6.2f} "
+            f"${total_pnl:+8,.0f}"
         )
 
-    # ── Filtered vs Unfiltered ──
+    # ── Default vs Optimized vs VIX-Filtered ──
     print("\n" + "-" * 70)
-    print("  Comparison: VIX-Filtered vs Unfiltered")
+    print("  Comparison: Default vs Optimized vs VIX-Filtered")
     print("-" * 70)
 
-    # Unfiltered: run without VIX filter
-    strat_unfiltered = MESMeanReversionStrategy(capital=10_000.0)
-    strat_unfiltered.generate_signals(df, vix_series=None)
+    # Default params, no VIX filter
+    strat_default = MESMeanReversionStrategy(capital=10_000.0)
+    strat_default.generate_signals(df, vix_series=None)
+    _print_strat_line("Default (no VIX)", strat_default)
 
-    strat_filtered = MESMeanReversionStrategy(capital=10_000.0)
+    # Optimized params, no VIX filter
+    strat_opt_novix = MESMeanReversionStrategy(capital=10_000.0, params=best_params)
+    strat_opt_novix.generate_signals(df, vix_series=None)
+    _print_strat_line("Optimized (no VIX)", strat_opt_novix)
+
+    # Optimized params + VIX filter
+    strat_filtered = MESMeanReversionStrategy(capital=10_000.0, params=best_params)
     strat_filtered.generate_signals(df, vix_series=vix_series)
+    _print_strat_line("Optimized + VIX", strat_filtered)
 
-    for label, strat in [("Unfiltered", strat_unfiltered), ("VIX-Filtered", strat_filtered)]:
-        if len(strat.trades) < 2:
-            print(f"  {label:15s}: No trades")
-            continue
-        pnls = np.array([t.pnl for t in strat.trades])
-        equity = np.cumsum(np.concatenate([[10000.0], pnls]))
-        rets = np.diff(equity) / equity[:-1]
-        m = compute_all_metrics(rets, pnls, equity)
-        print(
-            f"  {label:15s}: Sharpe={m['sharpe']:.3f}, "
-            f"MaxDD={m['max_drawdown']*100:.1f}%, "
-            f"Trades={m['total_trades']}, "
-            f"WinRate={m['win_rate']*100:.1f}%, "
-            f"PF={m['profit_factor']:.2f}"
-        )
+    # ── Monte Carlo on best variant ──
+    best_strat = strat_filtered if len(strat_filtered.trades) >= len(strat_opt_novix.trades) // 2 else strat_opt_novix
+    best_label = "VIX-Filtered" if best_strat is strat_filtered else "Optimized"
 
-    # ── Monte Carlo on VIX-Filtered ──
     print("\n" + "-" * 70)
-    print("  Monte Carlo Simulation (VIX-Filtered, 1000 paths)")
+    print(f"  Monte Carlo Simulation ({best_label}, 1000 paths)")
     print("-" * 70)
 
-    if len(strat_filtered.trades) >= 2:
-        trade_pnls = np.array([t.pnl for t in strat_filtered.trades])
+    if len(best_strat.trades) >= 2:
+        trade_pnls = np.array([t.pnl for t in best_strat.trades])
         mc = MonteCarloSimulator(n_paths=1000, seed=42)
         mc_result = mc.simulate(trade_pnls, initial_capital=10_000.0)
 
@@ -240,5 +319,11 @@ def main(use_synthetic: bool = False) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--synthetic", action="store_true")
+    parser.add_argument(
+        "--bar-size",
+        default="5min",
+        choices=["1min", "5min", "15min", "1h"],
+        help="Bar size to use (default: 5min)",
+    )
     args = parser.parse_args()
-    main(use_synthetic=args.synthetic)
+    main(use_synthetic=args.synthetic, bar_size=args.bar_size)

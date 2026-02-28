@@ -79,6 +79,42 @@ def max_drawdown(equity_curve: np.ndarray) -> float:
     return float(np.max(drawdown))
 
 
+def max_drawdown_detail(equity_curve: np.ndarray) -> dict:
+    """Detailed maximum drawdown analysis.
+
+    Args:
+        equity_curve: Array of portfolio equity values
+
+    Returns:
+        Dict with max_dd_pct, max_dd_dollars, peak_idx, trough_idx, recovery_needed
+    """
+    if len(equity_curve) < 2:
+        return {
+            "max_dd_pct": 0.0,
+            "max_dd_dollars": 0.0,
+            "peak_idx": 0,
+            "trough_idx": 0,
+            "recovery_needed": 0.0,
+        }
+    peak = np.maximum.accumulate(equity_curve)
+    drawdown = (peak - equity_curve) / peak
+    drawdown = np.where(np.isfinite(drawdown), drawdown, 0.0)
+
+    trough_idx = int(np.argmax(drawdown))
+    peak_idx = int(np.argmax(equity_curve[:trough_idx + 1])) if trough_idx > 0 else 0
+    max_dd_pct = float(drawdown[trough_idx])
+    max_dd_dollars = float(peak[trough_idx] - equity_curve[trough_idx])
+    recovery_needed = max_dd_pct / (1 - max_dd_pct) if max_dd_pct < 1.0 else float("inf")
+
+    return {
+        "max_dd_pct": max_dd_pct,
+        "max_dd_dollars": max_dd_dollars,
+        "peak_idx": peak_idx,
+        "trough_idx": trough_idx,
+        "recovery_needed": recovery_needed,
+    }
+
+
 def max_drawdown_duration(equity_curve: np.ndarray) -> int:
     """Duration (in bars) of the longest drawdown.
 
@@ -157,6 +193,33 @@ def win_rate(trades: np.ndarray) -> float:
     if len(trades) == 0:
         return 0.0
     return float(np.sum(trades > 0) / len(trades))
+
+
+def avg_trade_pnl(trades: np.ndarray) -> dict:
+    """Detailed average trade P&L breakdown.
+
+    Args:
+        trades: Array of individual trade P&L values
+
+    Returns:
+        Dict with avg_win, avg_loss, avg_all, reward_risk_ratio
+    """
+    if len(trades) == 0:
+        return {"avg_win": 0.0, "avg_loss": 0.0, "avg_all": 0.0, "reward_risk_ratio": 0.0}
+
+    winners = trades[trades > 0]
+    losers = trades[trades < 0]
+    avg_win = float(np.mean(winners)) if len(winners) > 0 else 0.0
+    avg_loss = float(np.mean(losers)) if len(losers) > 0 else 0.0
+    avg_all = float(np.mean(trades))
+    rr = abs(avg_win / avg_loss) if avg_loss != 0 else float("inf") if avg_win > 0 else 0.0
+
+    return {
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "avg_all": avg_all,
+        "reward_risk_ratio": rr,
+    }
 
 
 def expectancy(trades: np.ndarray) -> float:

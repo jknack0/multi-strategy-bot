@@ -24,7 +24,7 @@ IB_READONLY: bool = os.getenv("IB_READONLY", "False").lower() == "true"
 # ── Polygon.io ───────────────────────────────────────────────────────────────
 POLYGON_API_KEY: str = os.getenv("POLYGON_API_KEY", "")
 POLYGON_BASE_URL: str = "https://api.polygon.io"
-POLYGON_RATE_LIMIT_CALLS: int = int(os.getenv("POLYGON_RATE_LIMIT_CALLS", "5"))
+POLYGON_RATE_LIMIT_CALLS: int = int(os.getenv("POLYGON_RATE_LIMIT_CALLS", "200"))
 POLYGON_RATE_LIMIT_PERIOD: float = float(os.getenv("POLYGON_RATE_LIMIT_PERIOD", "60.0"))
 
 # ── QuestDB ──────────────────────────────────────────────────────────────────
@@ -45,6 +45,9 @@ DEFAULT_SYMBOL: str = os.getenv("DEFAULT_SYMBOL", "MES")
 BAR_SIZE_RT: str = os.getenv("BAR_SIZE_RT", "5 secs")
 COMMISSION_PER_SIDE: float = float(os.getenv("COMMISSION_PER_SIDE", "0.62"))
 SLIPPAGE_TICKS: float = float(os.getenv("SLIPPAGE_TICKS", "0.25"))
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
 # ── Backtest Defaults ────────────────────────────────────────────────────────
 BACKTEST_INITIAL_CAPITAL: float = float(os.getenv("BACKTEST_INITIAL_CAPITAL", "10000.0"))

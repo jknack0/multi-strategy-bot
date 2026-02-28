@@ -84,6 +84,46 @@ class BollingerBands:
             "bandwidth": bandwidth,
         }
 
+    def compute_with_sigma(self, close: float, custom_sigma: float) -> Optional[Dict[str, float]]:
+        """Compute bands with a custom sigma (used for VIX-adjusted bands).
+
+        Uses the current window state but applies a different sigma value.
+        Does NOT modify internal state — call update() for that.
+
+        Args:
+            close: Current close price (used for pct_b calculation)
+            custom_sigma: Custom number of standard deviations
+
+        Returns:
+            Dict with middle, upper, lower, pct_b, bandwidth or None if not ready.
+        """
+        if len(self._window) < self.period:
+            return None
+
+        n = self.period
+        mean = self._sum / n
+        variance = max(0.0, (self._sum_sq / n) - (mean * mean))
+        std = variance ** 0.5
+
+        upper = mean + custom_sigma * std
+        lower = mean - custom_sigma * std
+
+        band_width_abs = upper - lower
+        if band_width_abs > 0:
+            pct_b = (close - lower) / band_width_abs
+        else:
+            pct_b = 0.5
+
+        bandwidth = band_width_abs / mean if mean != 0 else 0.0
+
+        return {
+            "middle": mean,
+            "upper": upper,
+            "lower": lower,
+            "pct_b": pct_b,
+            "bandwidth": bandwidth,
+        }
+
     @property
     def is_ready(self) -> bool:
         """True when enough data has been received to compute bands."""

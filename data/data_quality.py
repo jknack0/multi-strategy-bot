@@ -91,7 +91,7 @@ class DataQualityChecker:
 
         for i, delta in enumerate(deltas):
             if delta > max_delta:
-                ts = timestamps.iloc[i]
+                ts = timestamps[i + 1]  # +1 because diff() drops first element
                 issues.append(
                     QualityIssue(
                         timestamp=ts.to_pydatetime() if hasattr(ts, 'to_pydatetime') else ts,
@@ -239,3 +239,68 @@ class DataQualityChecker:
         )
 
         return report
+
+
+# ── Module-level convenience functions ────────────────────────────────────────
+
+def validate_bars(df: pd.DataFrame, bar_size: str = "1min") -> dict:
+    """Run all quality checks on OHLCV DataFrame.
+
+    Returns dict with lists of problematic indices:
+    - ohlc_violations: bars where high < low, etc.
+    - zero_volume: bars with volume == 0
+    - outliers: bars with >5 sigma returns
+    - duplicate_timestamps: repeated timestamps
+    - gaps: missing expected bars
+    """
+    checker = DataQualityChecker()
+
+    ohlc_issues = checker.check_ohlc_validity(df)
+    zero_vol = checker.check_zero_volume(df)
+    outliers = checker.check_outliers(df)
+    gaps = checker.check_gaps(df, bar_size)
+
+    # Duplicate timestamps
+    if isinstance(df.index, pd.DatetimeIndex):
+        dupes = df.index[df.index.duplicated()].tolist()
+    elif "timestamp" in df.columns:
+        dupes = df.loc[df["timestamp"].duplicated(), "timestamp"].tolist()
+    else:
+        dupes = []
+
+    return {
+        "ohlc_violations": [i.timestamp for i in ohlc_issues],
+        "zero_volume": [i.timestamp for i in zero_vol],
+        "outliers": [i.timestamp for i in outliers],
+        "duplicate_timestamps": dupes,
+        "gaps": [i.timestamp for i in gaps],
+    }
+
+
+def generate_quality_report(df: pd.DataFrame, symbol: str, bar_size: str = "1min") -> str:
+    """Generate human-readable quality report. Returns report as string."""
+    checker = DataQualityChecker()
+    report = checker.generate_daily_report(df, symbol, bar_size)
+
+    lines = [
+        f"=== Data Quality Report: {symbol} ({bar_size}) ===",
+        f"Total bars: {report.total_bars}",
+        f"Expected bars: {report.expected_bars}",
+        f"Completeness: {report.completeness_pct:.1f}%",
+        f"Gaps: {report.gap_count}",
+        f"Outliers: {report.outlier_count}",
+        f"Zero-volume: {report.zero_volume_count}",
+        f"Invalid OHLC: {report.ohlc_invalid_count}",
+        f"Clean: {report.is_clean}",
+    ]
+
+    if report.issues:
+        lines.append("\nIssues:")
+        for issue in report.issues[:20]:
+            lines.append(f"  [{issue.severity}] {issue.timestamp}: {issue.description}")
+        if len(report.issues) > 20:
+            lines.append(f"  ... and {len(report.issues) - 20} more")
+
+    text = "\n".join(lines)
+    print(text)
+    return text

@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Callable, Dict, List, Optional
 
-from ib_insync import IB, Contract, Future, MarketOrder, LimitOrder, util
+from ib_insync import IB, Contract, ContFuture, Future, MarketOrder, LimitOrder, util
 from ib_insync.objects import BarData, Position, AccountValue
 
 from config.settings import (
@@ -118,6 +118,23 @@ class IBConnector:
             currency=currency,
         )
 
+    @staticmethod
+    def make_continuous_futures_contract(
+        symbol: str = "MES",
+        exchange: str = "CME",
+        currency: str = "USD",
+    ) -> ContFuture:
+        """Create a continuous futures contract for historical data."""
+        spec = INSTRUMENTS.get(symbol)
+        if spec:
+            exchange = spec.exchange
+            currency = spec.currency
+        return ContFuture(
+            symbol=symbol,
+            exchange=exchange,
+            currency=currency,
+        )
+
     def qualify_contract(self, contract: Contract) -> Contract:
         """Qualify a contract so IB fills in the conId and other details."""
         qualified = self.ib.qualifyContracts(contract)
@@ -160,13 +177,26 @@ class IBConnector:
         bar_size: str = "1 min",
         what_to_show: str = "TRADES",
         use_rth: bool = False,
+        end_datetime: str = "",
+        contract: Optional[Contract] = None,
     ) -> List[BarData]:
-        """Fetch historical bars from IB."""
-        contract = self.make_futures_contract(symbol)
-        contract = self.qualify_contract(contract)
+        """Fetch historical bars from IB.
+
+        Args:
+            symbol: Instrument symbol (e.g., 'MES')
+            duration: Duration string (e.g., '1 D', '1 W')
+            bar_size: Bar size setting (e.g., '1 min', '5 mins')
+            what_to_show: Data type ('TRADES', 'MIDPOINT', etc.)
+            use_rth: Regular trading hours only
+            end_datetime: End date/time as 'YYYYMMDD HH:MM:SS' or '' for now
+            contract: Pre-qualified Contract to use (skips contract creation)
+        """
+        if contract is None:
+            contract = self.make_futures_contract(symbol)
+            contract = self.qualify_contract(contract)
         bars = self.ib.reqHistoricalData(
             contract,
-            endDateTime="",
+            endDateTime=end_datetime,
             durationStr=duration,
             barSizeSetting=bar_size,
             whatToShow=what_to_show,

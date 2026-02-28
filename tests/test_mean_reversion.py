@@ -258,8 +258,9 @@ class TestPositionSizing:
         # stop_dist = 5.0 points, point_value = 5.0
         # raw = 100 / (5.0 * 5.0) = 4.0
         # scaled = floor(4.0 * 1.0) = 4
+        # margin cap = 10000 * 0.50 / 2455 = 2
         contracts = strat.compute_position_size(5.0, 1.0)
-        assert contracts == 4
+        assert contracts == 2  # margin-capped
 
     def test_sizing_with_scale(self):
         """Position scale of 0.5 should halve contracts."""
@@ -268,23 +269,23 @@ class TestPositionSizing:
         contracts = strat.compute_position_size(5.0, 0.5)
         assert contracts == 2
 
-    def test_minimum_one_contract(self):
-        """Even with tiny risk budget, minimum is 1 contract."""
+    def test_insufficient_capital_returns_zero(self):
+        """When risk budget is too small for 1 contract, return 0 (no trade)."""
         strat = MESMeanReversionStrategy(capital=100.0)
         # dollar_risk = 100 * 0.01 = 1.0
         # raw = 1.0 / (50.0 * 5.0) = 0.004
-        # scaled = floor(0.004 * 1.0) = 0 → clamped to 1
+        # scaled = floor(0.004 * 1.0) = 0 → returns 0 (skip trade)
         contracts = strat.compute_position_size(50.0, 1.0)
-        assert contracts == 1
+        assert contracts == 0
 
     def test_margin_cap(self):
         """Contracts should not exceed 50% of margin capacity."""
         strat = MESMeanReversionStrategy(capital=10_000.0)
-        # margin cap = 10000 * 0.50 / 50 = 100
+        # margin cap = 10000 * 0.50 / 2455 = 2
         # With very small stop: raw = 100 / (0.01 * 5.0) = 2000
-        # Should be capped at 100
+        # Should be capped at 2
         contracts = strat.compute_position_size(0.01, 1.0)
-        assert contracts == 100  # margin cap
+        assert contracts == 2  # margin cap
 
     def test_zero_stop_returns_zero(self):
         strat = MESMeanReversionStrategy(capital=10_000.0)
@@ -386,7 +387,7 @@ class TestExitLogic:
         assert result.pnl < 0
 
     def test_long_take_profit(self):
-        """A LONG position should close when price reaches VWAP."""
+        """A LONG position should close when price reaches target."""
         strat = MESMeanReversionStrategy(capital=10_000.0)
         ts = ET.localize(datetime(2024, 3, 1, 11, 0))
 
@@ -397,6 +398,7 @@ class TestExitLogic:
             contracts=1,
             stop_price=4480.0,
             atr_at_entry=5.0,
+            target_price=4500.0,
         )
 
         vwap_data = {"vwap": 4500.0, "std": 2.0}
@@ -434,6 +436,7 @@ class TestExitLogic:
             contracts=1,
             stop_price=4520.0,
             atr_at_entry=5.0,
+            target_price=4500.0,
         )
 
         vwap_data = {"vwap": 4500.0, "std": 2.0}
@@ -461,8 +464,8 @@ class TestExitLogic:
         assert strat._is_flatten_time(ts_at) is True
         assert strat._is_flatten_time(ts_after) is True
 
-    def test_breakeven_stop_moved(self):
-        """Stop should move to breakeven after 1 ATR profit."""
+    def test_trailing_stop_activated(self):
+        """Trailing stop should activate and ratchet up after favorable excursion."""
         strat = MESMeanReversionStrategy(capital=10_000.0)
         ts = ET.localize(datetime(2024, 3, 1, 11, 0))
 
@@ -475,12 +478,13 @@ class TestExitLogic:
             atr_at_entry=5.0,
         )
 
-        # Price moved up by 1 ATR (5.0 points) but not to VWAP
-        vwap_data = {"vwap": 4510.0, "std": 2.0}  # VWAP above current price
+        # Price moved up by 1 ATR (5.0 points) — exceeds breakeven_atr_mult(0.7) * 5.0 = 3.5
+        vwap_data = {"vwap": 4510.0, "std": 2.0}
         result = strat._manage_position(4505.0, ts + timedelta(minutes=5), vwap_data, 5.0)
         assert result is None  # Still open
-        assert strat.position.breakeven_moved is True
-        assert strat.position.stop_price == 4500.0  # Moved to entry
+        assert strat.position.trailing_active is True
+        # trail stop = entry + 0.6 * max_favorable = 4500 + 0.6 * 5.0 = 4503.0
+        assert strat.position.stop_price == 4503.0
 
 
 # ══════════════════════════════════════════════════════════════════════════

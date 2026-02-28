@@ -28,10 +28,10 @@ ET = pytz.timezone("US/Eastern")
 
 # ── Data Loading ─────────────────────────────────────────────────────────
 
-def load_from_questdb() -> pd.DataFrame:
+def load_from_questdb(bar_size: str = "5min") -> pd.DataFrame:
     from data.questdb_client import QuestDBClient
     qdb = QuestDBClient()
-    df = qdb.get_bars("MES", "5min", limit=500_000)
+    df = qdb.get_bars("MES", bar_size, limit=500_000)
     if df.empty:
         raise RuntimeError("No data in QuestDB")
     return df
@@ -104,9 +104,9 @@ def generate_synthetic_vix(df: pd.DataFrame, seed: int = 42) -> pd.Series:
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
-def main(use_synthetic: bool = False) -> dict:
+def main(use_synthetic: bool = False, bar_size: str = "5min") -> dict:
     print("=" * 70)
-    print("  Strategy A: MES Mean Reversion — Full Backtest")
+    print(f"  Strategy A: MES {bar_size} Mean Reversion — Full Backtest")
     print("=" * 70)
 
     # 1. Load data
@@ -116,7 +116,7 @@ def main(use_synthetic: bool = False) -> dict:
         vix_series = generate_synthetic_vix(df)
     else:
         try:
-            df = load_from_questdb()
+            df = load_from_questdb(bar_size)
             vix_series = generate_synthetic_vix(df)
             print(f"\n[INFO] Loaded {len(df)} bars from QuestDB")
         except Exception as exc:
@@ -199,5 +199,11 @@ def main(use_synthetic: bool = False) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--synthetic", action="store_true")
+    parser.add_argument(
+        "--bar-size",
+        default="5min",
+        choices=["1min", "5min", "15min", "1h"],
+        help="Bar size to use (default: 5min)",
+    )
     args = parser.parse_args()
-    main(use_synthetic=args.synthetic)
+    main(use_synthetic=args.synthetic, bar_size=args.bar_size)

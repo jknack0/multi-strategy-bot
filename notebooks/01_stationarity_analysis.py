@@ -1,12 +1,12 @@
 """
-01 — Stationarity Analysis for MES 5-min Returns.
+01 — Stationarity Analysis for MES Returns.
 
 Runs ADF test, computes Hurst exponent, and estimates half-life of
 mean reversion to validate the premise of Strategy A.
 
 Usage:
     uv run python notebooks/01_stationarity_analysis.py
-    # or with synthetic data if QuestDB is not available:
+    uv run python notebooks/01_stationarity_analysis.py --bar-size 1min
     uv run python notebooks/01_stationarity_analysis.py --synthetic
 """
 
@@ -25,13 +25,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ── Data Loading ─────────────────────────────────────────────────────────
 
-def load_data_questdb() -> pd.Series:
-    """Load 2 years of MES 5-min closes from QuestDB."""
+def load_data_questdb(bar_size: str = "5min") -> pd.Series:
+    """Load MES closes from QuestDB."""
     from data.questdb_client import QuestDBClient
     qdb = QuestDBClient()
-    df = qdb.get_bars("MES", "5min", limit=500_000)
+    df = qdb.get_bars("MES", bar_size, limit=500_000)
     if df.empty:
-        raise RuntimeError("No data in QuestDB. Run polygon_fetcher first.")
+        raise RuntimeError("No data in QuestDB. Run ib_fetcher first.")
     return df["close"]
 
 
@@ -53,8 +53,12 @@ def generate_synthetic_data(n: int = 100_000, seed: int = 42) -> pd.Series:
             + sigma * np.sqrt(dt) * rng.randn()
         )
 
-    idx = pd.date_range("2022-01-01", periods=n, freq="5min")
+    idx = pd.date_range("2022-01-01", periods=n, freq="5min")  # synthetic always 5min
     return pd.Series(prices, index=idx, name="close")
+
+
+# Bar size to minutes mapping
+_BAR_MINUTES = {"1min": 1, "5min": 5, "15min": 15, "1h": 60}
 
 
 # ── ADF Test ─────────────────────────────────────────────────────────────
@@ -136,10 +140,11 @@ def half_life_ols(prices: np.ndarray) -> float:
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
-def main(use_synthetic: bool = False) -> dict:
+def main(use_synthetic: bool = False, bar_size: str = "5min") -> dict:
     """Run complete stationarity analysis and return results dict."""
+    bar_min = _BAR_MINUTES.get(bar_size, 5)
     print("=" * 70)
-    print("  MES 5-min Stationarity Analysis")
+    print(f"  MES {bar_size} Stationarity Analysis")
     print("=" * 70)
 
     if use_synthetic:
@@ -147,7 +152,7 @@ def main(use_synthetic: bool = False) -> dict:
         prices = generate_synthetic_data()
     else:
         try:
-            prices = load_data_questdb()
+            prices = load_data_questdb(bar_size)
         except Exception as exc:
             print(f"\n[WARN] QuestDB unavailable ({exc}), falling back to synthetic data")
             prices = generate_synthetic_data()
@@ -200,7 +205,7 @@ def main(use_synthetic: bool = False) -> dict:
     hl = half_life_ols(prices_arr)
     print(f"  Half-life = {hl:.1f} bars")
     if hl < float("inf"):
-        print(f"  At 5-min bars, that's ~{hl * 5:.0f} minutes or ~{hl * 5 / 60:.1f} hours")
+        print(f"  At {bar_size} bars, that's ~{hl * bar_min:.0f} minutes or ~{hl * bar_min / 60:.1f} hours")
     else:
         print("  ✗ WARNING: No mean reversion detected (β >= 0)")
 
@@ -208,7 +213,7 @@ def main(use_synthetic: bool = False) -> dict:
     print("\n" + "=" * 70)
     stationarity = "stationary" if adf["is_stationary"] else "non-stationary"
     print(
-        f"MES 5-min returns are [{stationarity}], "
+        f"MES {bar_size} returns are [{stationarity}], "
         f"H=[{H:.4f}], half-life=[{hl:.1f}] bars"
     )
 
@@ -238,5 +243,11 @@ def main(use_synthetic: bool = False) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--synthetic", action="store_true", help="Use synthetic data")
+    parser.add_argument(
+        "--bar-size",
+        default="5min",
+        choices=list(_BAR_MINUTES.keys()),
+        help="Bar size to analyse (default: 5min)",
+    )
     args = parser.parse_args()
-    main(use_synthetic=args.synthetic)
+    main(use_synthetic=args.synthetic, bar_size=args.bar_size)

@@ -229,10 +229,42 @@ class QuestDBClient:
             df.set_index("timestamp", inplace=True)
         return df
 
-    def create_table(self) -> None:
-        """Create the OHLCV table if it doesn't exist (via REST/SQL exec)."""
-        import requests
+    def get_latest_timestamp(
+        self, symbol: str, bar_size: str,
+    ) -> Optional[datetime]:
+        """Return the latest stored timestamp for a symbol/bar_size, or None."""
         sql = (
+            f"SELECT max(timestamp) AS latest FROM {self.TABLE_NAME} "
+            f"WHERE symbol = '{symbol}' AND bar_size = '{bar_size}'"
+        )
+        try:
+            df = self.query(sql)
+            if df.empty or df.iloc[0]["latest"] is None:
+                return None
+            return pd.to_datetime(df.iloc[0]["latest"]).to_pydatetime()
+        except Exception:
+            return None
+
+    def count_bars(self, symbol: str, bar_size: str) -> int:
+        """Count total bars for a symbol/bar_size combination."""
+        sql = (
+            f"SELECT count() AS cnt FROM {self.TABLE_NAME} "
+            f"WHERE symbol = '{symbol}' AND bar_size = '{bar_size}'"
+        )
+        try:
+            df = self.query(sql)
+            if df.empty:
+                return 0
+            return int(df.iloc[0]["cnt"])
+        except Exception:
+            return 0
+
+    def create_table(self) -> None:
+        """Create the OHLCV table with deduplication enabled."""
+        import requests
+        url = f"http://{self.host}:{QUESTDB_HTTP_PORT}/exec"
+
+        create_sql = (
             f"CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} ("
             "timestamp TIMESTAMP, "
             "symbol SYMBOL, "
@@ -243,13 +275,19 @@ class QuestDBClient:
             "volume LONG, "
             "vwap DOUBLE, "
             "bar_size SYMBOL"
-            ") TIMESTAMP(timestamp) PARTITION BY MONTH;"
+            ") TIMESTAMP(timestamp) PARTITION BY MONTH WAL;"
         )
-        url = f"http://{self.host}:{QUESTDB_HTTP_PORT}/exec"
+        dedup_sql = (
+            f"ALTER TABLE {self.TABLE_NAME} DEDUP ENABLE UPSERT KEYS(timestamp, symbol, bar_size);"
+        )
         try:
-            resp = requests.get(url, params={"query": sql}, timeout=10)
+            resp = requests.get(url, params={"query": create_sql}, timeout=10)
             resp.raise_for_status()
             logger.info("Table '%s' created/verified", self.TABLE_NAME)
+            # Enable dedup (idempotent — safe to re-run)
+            resp = requests.get(url, params={"query": dedup_sql}, timeout=10)
+            resp.raise_for_status()
+            logger.info("Dedup enabled on '%s'", self.TABLE_NAME)
         except requests.RequestException as exc:
             logger.error("Failed to create table: %s", exc)
             raise

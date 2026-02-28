@@ -43,6 +43,9 @@ class Position:
     contracts: int
     stop_price: float
     atr_at_entry: float
+    target_price: float = 0.0
+    max_favorable: float = 0.0
+    trailing_active: bool = False
     breakeven_moved: bool = False
 
 
@@ -72,7 +75,7 @@ class MESMeanReversionStrategy:
         "bb_period": 20,
         "bb_sigma": 2.0,
         "atr_period": 14,
-        "atr_stop_multiplier": 2.0,
+        "atr_stop_multiplier": 3.5,
         "vwap_deviation_entry": 1.0,
         "trade_start_hour": 10,
         "trade_start_minute": 0,
@@ -83,7 +86,20 @@ class MESMeanReversionStrategy:
         "max_positions": 1,
         "risk_per_trade": 0.01,
         "max_margin_pct": 0.50,
-        "breakeven_atr_mult": 1.0,
+        "breakeven_atr_mult": 0.7,
+        # Trend filter: 0 = disabled, >0 = EMA period
+        "trend_ema_period": 0,
+        # Partial TP: fraction of entry-to-VWAP distance (1.0 = full VWAP)
+        "take_profit_pct": 1.0,
+        # Trailing stop: 0.0 = legacy breakeven, >0 = trail at factor * max_favorable
+        "trailing_stop_factor": 0.6,
+        # R:R filter: skip entries with reward/risk below this (0.0 = no filter)
+        "min_rr_ratio": 0.0,
+        # Daily risk limits: 0 = unlimited
+        "max_daily_losses": 0,
+        "max_daily_loss_dollars": 0.0,
+        # Long only mode: skip all short entries
+        "long_only": False,
     }
 
     def __init__(self, params: Optional[Dict] = None, capital: float = 10000.0) -> None:
@@ -103,10 +119,22 @@ class MESMeanReversionStrategy:
         self._vwap = VWAP(num_std_bands=2)
         self._vix_clf = VIXRegimeClassifier()
 
+        # EMA for trend filter
+        self._ema = None
+        if self.params["trend_ema_period"] > 0:
+            from indicators.ema import EMA
+            self._ema = EMA(period=self.params["trend_ema_period"])
+
         # State
         self.position: Optional[Position] = None
         self.trades: List[TradeRecord] = []
         self._current_vix: float = 20.0  # Default normal
+
+        # Daily risk state
+        self._daily_losses: int = 0
+        self._daily_loss_dollars: float = 0.0
+        self._last_trade_date = None
+        self._daily_halted: bool = False
 
     # ── Configuration ────────────────────────────────────────────────────
 
@@ -132,9 +160,18 @@ class MESMeanReversionStrategy:
         self._atr = ATR(period=self.params["atr_period"])
         self._vwap = VWAP(num_std_bands=2)
         self._vix_clf = VIXRegimeClassifier()
+        if self.params["trend_ema_period"] > 0:
+            from indicators.ema import EMA
+            self._ema = EMA(period=self.params["trend_ema_period"])
+        else:
+            self._ema = None
         self.position = None
         self.trades = []
         self._current_vix = 20.0
+        self._daily_losses = 0
+        self._daily_loss_dollars = 0.0
+        self._last_trade_date = None
+        self._daily_halted = False
 
     # ── Time Filters ─────────────────────────────────────────────────────
 
@@ -193,8 +230,10 @@ class MESMeanReversionStrategy:
         margin_capacity = (self.capital * self.params["max_margin_pct"]) / self.spec.margin
         max_contracts = int(margin_capacity)
 
-        contracts = max(1, min(scaled, max_contracts))
-        return contracts
+        if max_contracts <= 0 or scaled <= 0:
+            return 0
+
+        return min(scaled, max_contracts)
 
     # ── Signal Generation ────────────────────────────────────────────────
 
@@ -207,7 +246,7 @@ class MESMeanReversionStrategy:
         close: float,
         volume: int,
     ) -> Optional[TradeRecord]:
-        """Process a single 5-min bar. Returns a TradeRecord if a trade closed.
+        """Process a single bar. Returns a TradeRecord if a trade closed.
 
         This is the core method called for each bar during live trading
         or event-driven backtesting.
@@ -216,14 +255,33 @@ class MESMeanReversionStrategy:
         vwap_data = self._vwap.update(timestamp, high, low, close, volume)
         bb_data = self._bb.update(close)
         atr_val = self._atr.update(high, low, close)
+        ema_val = self._ema.update(close) if self._ema is not None else None
 
-        # Time stop: flatten at 3:55 PM ET
+        # Daily risk reset
+        current_date = self._to_et(timestamp).date()
+        if self._last_trade_date is not None and current_date != self._last_trade_date:
+            self._daily_losses = 0
+            self._daily_loss_dollars = 0.0
+            self._daily_halted = False
+        self._last_trade_date = current_date
+
+        # Time stop: flatten at 3:55 PM ET (only losing/flat positions)
         if self._is_flatten_time(timestamp) and self.position is not None:
-            return self._close_position(close, timestamp, "time_stop")
+            pos = self.position
+            if pos.side == Side.LONG:
+                unrealized = close - pos.entry_price
+            else:
+                unrealized = pos.entry_price - close
+            if unrealized <= 0:
+                return self._close_position(close, timestamp, "time_stop")
 
         # Manage existing position
         if self.position is not None:
             return self._manage_position(close, timestamp, vwap_data, atr_val)
+
+        # Daily halt check
+        if self._daily_halted:
+            return None
 
         # Need all indicators ready before entering
         if bb_data is None or atr_val is None:
@@ -254,9 +312,21 @@ class MESMeanReversionStrategy:
         vwap_dev = self.params["vwap_deviation_entry"]
         stop_mult = self.params["atr_stop_multiplier"]
         stop_dist = stop_mult * atr_val
+        tp_pct = self.params["take_profit_pct"]
+        min_rr = self.params["min_rr_ratio"]
+        trend_period = self.params["trend_ema_period"]
 
         # LONG signal
         if close <= bb_lower and close < vwap_val - vwap_dev * vwap_std:
+            # Trend filter: skip longs in downtrend
+            if trend_period > 0 and ema_val is not None and close < ema_val:
+                return None
+            # Compute partial TP target and R:R
+            target_price = close + tp_pct * (vwap_val - close)
+            if min_rr > 0 and stop_dist > 0:
+                rr = (target_price - close) / stop_dist
+                if rr < min_rr:
+                    return None
             contracts = self.compute_position_size(stop_dist, pos_scale)
             if contracts > 0 and self.position is None:
                 self.position = Position(
@@ -266,22 +336,33 @@ class MESMeanReversionStrategy:
                     contracts=contracts,
                     stop_price=close - stop_dist,
                     atr_at_entry=atr_val,
+                    target_price=target_price,
                 )
             return None
 
         # SHORT signal
-        if close >= bb_upper and close > vwap_val + vwap_dev * vwap_std:
-            contracts = self.compute_position_size(stop_dist, pos_scale)
-            if contracts > 0 and self.position is None:
-                self.position = Position(
-                    side=Side.SHORT,
-                    entry_price=close,
-                    entry_time=timestamp,
-                    contracts=contracts,
-                    stop_price=close + stop_dist,
-                    atr_at_entry=atr_val,
-                )
-            return None
+        if not self.params.get("long_only", False):
+            if close >= bb_upper and close > vwap_val + vwap_dev * vwap_std:
+                # Trend filter: skip shorts in uptrend
+                if trend_period > 0 and ema_val is not None and close > ema_val:
+                    return None
+                target_price = close - tp_pct * (close - vwap_val)
+                if min_rr > 0 and stop_dist > 0:
+                    rr = (close - target_price) / stop_dist
+                    if rr < min_rr:
+                        return None
+                contracts = self.compute_position_size(stop_dist, pos_scale)
+                if contracts > 0 and self.position is None:
+                    self.position = Position(
+                        side=Side.SHORT,
+                        entry_price=close,
+                        entry_time=timestamp,
+                        contracts=contracts,
+                        stop_price=close + stop_dist,
+                        atr_at_entry=atr_val,
+                        target_price=target_price,
+                    )
+                return None
 
         return None
 
@@ -320,29 +401,58 @@ class MESMeanReversionStrategy:
         atr_val: Optional[float],
     ) -> Optional[TradeRecord]:
         pos = self.position
-        vwap_val = vwap_data["vwap"]
+        trailing_factor = self.params["trailing_stop_factor"]
 
         if pos.side == Side.LONG:
+            unrealized = close - pos.entry_price
+
             # Stop loss
             if close <= pos.stop_price:
                 return self._close_position(close, timestamp, "stop_loss")
-            # Take profit: price crosses above VWAP
-            if close >= vwap_val:
+            # Take profit at target
+            if pos.target_price > 0 and close >= pos.target_price:
                 return self._close_position(close, timestamp, "take_profit")
-            # Trailing: move stop to breakeven after 1 ATR unrealized profit
-            if not pos.breakeven_moved and atr_val is not None:
+
+            # Track max favorable excursion
+            if unrealized > pos.max_favorable:
+                pos.max_favorable = unrealized
+
+            # Trailing stop logic
+            if trailing_factor > 0.0 and atr_val is not None:
+                activation = self.params["breakeven_atr_mult"] * pos.atr_at_entry
+                if pos.max_favorable >= activation:
+                    pos.trailing_active = True
+                    new_stop = pos.entry_price + trailing_factor * pos.max_favorable
+                    if new_stop > pos.stop_price:
+                        pos.stop_price = new_stop
+            elif not pos.breakeven_moved and atr_val is not None:
+                # Legacy breakeven logic
                 be_threshold = self.params["breakeven_atr_mult"] * pos.atr_at_entry
-                if close - pos.entry_price >= be_threshold:
+                if unrealized >= be_threshold:
                     pos.stop_price = pos.entry_price
                     pos.breakeven_moved = True
+
         else:  # SHORT
+            unrealized = pos.entry_price - close
+
             if close >= pos.stop_price:
                 return self._close_position(close, timestamp, "stop_loss")
-            if close <= vwap_val:
+            if pos.target_price > 0 and close <= pos.target_price:
                 return self._close_position(close, timestamp, "take_profit")
-            if not pos.breakeven_moved and atr_val is not None:
+
+            if unrealized > pos.max_favorable:
+                pos.max_favorable = unrealized
+
+            if trailing_factor > 0.0 and atr_val is not None:
+                activation = self.params["breakeven_atr_mult"] * pos.atr_at_entry
+                if pos.max_favorable >= activation:
+                    pos.trailing_active = True
+                    new_stop = pos.entry_price - trailing_factor * pos.max_favorable
+                    if new_stop < pos.stop_price:
+                        pos.stop_price = new_stop
+            elif not pos.breakeven_moved and atr_val is not None:
                 be_threshold = self.params["breakeven_atr_mult"] * pos.atr_at_entry
-                if pos.entry_price - close >= be_threshold:
+                if unrealized >= be_threshold:
                     pos.stop_price = pos.entry_price
                     pos.breakeven_moved = True
 
@@ -371,7 +481,284 @@ class MESMeanReversionStrategy:
         self.trades.append(record)
         self.capital += total_pnl
         self.position = None
+
+        # Daily loss tracking
+        if total_pnl < 0:
+            self._daily_losses += 1
+            self._daily_loss_dollars += abs(total_pnl)
+            max_losses = self.params["max_daily_losses"]
+            max_loss_dollars = self.params["max_daily_loss_dollars"]
+            if max_losses > 0 and self._daily_losses >= max_losses:
+                self._daily_halted = True
+            if max_loss_dollars > 0 and self._daily_loss_dollars >= max_loss_dollars:
+                self._daily_halted = True
+
         return record
+
+    # ── Optimized Signal Generation ─────────────────────────────────────
+
+    def _process_bar_precomputed(
+        self,
+        timestamp: datetime,
+        close: float,
+        vwap_val: float,
+        vwap_std: float,
+        bb_mean: float,
+        bb_std: float,
+        atr_val: float,
+        in_window: bool,
+        is_flatten: bool,
+        ema_val: float = float("nan"),
+    ) -> Optional[TradeRecord]:
+        """Process a bar using pre-computed indicator values.
+
+        Same logic as on_bar() but skips indicator computation.
+        Used by generate_signals_fast() with precomputed arrays.
+        """
+        # Daily risk reset
+        current_date = timestamp.date() if hasattr(timestamp, "date") else timestamp
+        if self._last_trade_date is not None and current_date != self._last_trade_date:
+            self._daily_losses = 0
+            self._daily_loss_dollars = 0.0
+            self._daily_halted = False
+        self._last_trade_date = current_date
+
+        # Time stop: flatten losing/flat positions at 3:55 PM ET
+        if is_flatten and self.position is not None:
+            pos = self.position
+            if pos.side == Side.LONG:
+                unrealized = close - pos.entry_price
+            else:
+                unrealized = pos.entry_price - close
+            if unrealized <= 0:
+                return self._close_position(close, timestamp, "time_stop")
+
+        # Manage existing position
+        if self.position is not None:
+            vwap_data = {"vwap": vwap_val, "std": vwap_std}
+            return self._manage_position(close, timestamp, vwap_data, atr_val)
+
+        # Daily halt check
+        if self._daily_halted:
+            return None
+
+        # Need all indicators ready
+        if np.isnan(bb_mean) or np.isnan(atr_val):
+            return None
+
+        # Time filter
+        if not in_window:
+            return None
+
+        # VIX filter
+        eff_sigma, pos_scale, allowed = self._get_vix_adjustments()
+        if not allowed:
+            return None
+
+        # Compute effective BB bands
+        if eff_sigma != self.params["bb_sigma"]:
+            bb_upper = bb_mean + eff_sigma * bb_std
+            bb_lower = bb_mean - eff_sigma * bb_std
+        else:
+            bb_upper = bb_mean + self.params["bb_sigma"] * bb_std
+            bb_lower = bb_mean - self.params["bb_sigma"] * bb_std
+
+        vwap_dev = self.params["vwap_deviation_entry"]
+        stop_mult = self.params["atr_stop_multiplier"]
+        stop_dist = stop_mult * atr_val
+        tp_pct = self.params["take_profit_pct"]
+        min_rr = self.params["min_rr_ratio"]
+        trend_period = self.params["trend_ema_period"]
+
+        # LONG signal
+        if close <= bb_lower and close < vwap_val - vwap_dev * vwap_std:
+            # Trend filter: skip longs in downtrend
+            if trend_period > 0 and not np.isnan(ema_val) and close < ema_val:
+                return None
+            target_price = close + tp_pct * (vwap_val - close)
+            if min_rr > 0 and stop_dist > 0:
+                rr = (target_price - close) / stop_dist
+                if rr < min_rr:
+                    return None
+            contracts = self.compute_position_size(stop_dist, pos_scale)
+            if contracts > 0 and self.position is None:
+                self.position = Position(
+                    side=Side.LONG,
+                    entry_price=close,
+                    entry_time=timestamp,
+                    contracts=contracts,
+                    stop_price=close - stop_dist,
+                    atr_at_entry=atr_val,
+                    target_price=target_price,
+                )
+            return None
+
+        # SHORT signal
+        if not self.params.get("long_only", False):
+            if close >= bb_upper and close > vwap_val + vwap_dev * vwap_std:
+                if trend_period > 0 and not np.isnan(ema_val) and close > ema_val:
+                    return None
+                target_price = close - tp_pct * (close - vwap_val)
+                if min_rr > 0 and stop_dist > 0:
+                    rr = (close - target_price) / stop_dist
+                    if rr < min_rr:
+                        return None
+                contracts = self.compute_position_size(stop_dist, pos_scale)
+                if contracts > 0 and self.position is None:
+                    self.position = Position(
+                        side=Side.SHORT,
+                        entry_price=close,
+                        entry_time=timestamp,
+                        contracts=contracts,
+                        stop_price=close + stop_dist,
+                        atr_at_entry=atr_val,
+                        target_price=target_price,
+                    )
+                return None
+
+        return None
+
+    def generate_signals_fast(
+        self,
+        df: pd.DataFrame,
+        vix_series: Optional[pd.Series] = None,
+        precomputed: Optional[Dict] = None,
+    ) -> Tuple[pd.Series, pd.Series]:
+        """Optimized generate_signals() — same logic, no iterrows().
+
+        Pre-extracts numpy arrays and pre-computes time masks to avoid
+        per-bar overhead. When precomputed indicators are provided, skips
+        redundant indicator computation entirely.
+
+        Args:
+            df: OHLCV DataFrame with DatetimeIndex
+            vix_series: Optional daily VIX values indexed by date
+            precomputed: Optional dict from precompute_indicators()
+
+        Returns:
+            (entries, exits) boolean Series aligned with df.index
+        """
+        self.reset()
+        n = len(df)
+
+        if precomputed is not None:
+            return self._generate_signals_precomputed(df, precomputed)
+
+        # Pre-extract OHLCV as numpy arrays
+        opens = df["open"].values.astype(np.float64)
+        highs = df["high"].values.astype(np.float64)
+        lows = df["low"].values.astype(np.float64)
+        closes = df["close"].values.astype(np.float64)
+        volumes = df["volume"].values.astype(np.int64)
+
+        # Pre-compute timestamps as ET-localized datetimes
+        timestamps = np.empty(n, dtype=object)
+        for i in range(n):
+            ts = df.index[i]
+            if not isinstance(ts, datetime):
+                ts = pd.Timestamp(ts).to_pydatetime()
+            if ts.tzinfo is None:
+                ts = ET.localize(ts)
+            timestamps[i] = ts
+
+        # Pre-compute VIX per bar
+        if vix_series is not None:
+            vix_dict = vix_series.to_dict()
+            current_vix = 20.0
+            for i in range(n):
+                d = timestamps[i].date()
+                if d in vix_dict:
+                    current_vix = float(vix_dict[d])
+                    self._current_vix = current_vix
+
+        # Main loop — direct array indexing instead of iterrows
+        entries_arr = np.zeros(n, dtype=bool)
+        exits_arr = np.zeros(n, dtype=bool)
+
+        for i in range(n):
+            if vix_series is not None:
+                d = timestamps[i].date()
+                if d in vix_dict:
+                    self._current_vix = float(vix_dict[d])
+
+            had_position = self.position is not None
+
+            result = self.on_bar(
+                timestamp=timestamps[i],
+                open_=opens[i],
+                high=highs[i],
+                low=lows[i],
+                close=closes[i],
+                volume=int(volumes[i]),
+            )
+
+            if not had_position and self.position is not None:
+                entries_arr[i] = True
+            if result is not None:
+                exits_arr[i] = True
+
+        return (
+            pd.Series(entries_arr, index=df.index),
+            pd.Series(exits_arr, index=df.index),
+        )
+
+    def _generate_signals_precomputed(
+        self,
+        df: pd.DataFrame,
+        precomputed: Dict,
+    ) -> Tuple[pd.Series, pd.Series]:
+        """Fast path using precomputed indicators — no indicator recomputation."""
+        n = len(df)
+        bb_period = self.params["bb_period"]
+        trend_period = self.params["trend_ema_period"]
+
+        timestamps = precomputed["timestamps"]
+        closes = precomputed["closes"]
+        vix_per_bar = precomputed["vix_per_bar"]
+        vwap_vals = precomputed["vwap_vals"]
+        vwap_stds = precomputed["vwap_stds"]
+        bb_means = precomputed["bb_means"][bb_period]
+        bb_stds = precomputed["bb_stds"][bb_period]
+        atr_vals = precomputed["atr_vals"]
+        in_window = precomputed["in_window"]
+        is_flatten = precomputed["is_flatten"]
+
+        # EMA values for trend filter
+        ema_vals_dict = precomputed.get("ema_vals", {})
+        if trend_period > 0 and trend_period in ema_vals_dict:
+            ema_arr = ema_vals_dict[trend_period]
+        else:
+            ema_arr = np.full(n, np.nan)
+
+        entries_arr = np.zeros(n, dtype=bool)
+        exits_arr = np.zeros(n, dtype=bool)
+
+        for i in range(n):
+            self._current_vix = vix_per_bar[i]
+            had_position = self.position is not None
+
+            result = self._process_bar_precomputed(
+                timestamp=timestamps[i],
+                close=closes[i],
+                vwap_val=vwap_vals[i],
+                vwap_std=vwap_stds[i],
+                bb_mean=bb_means[i],
+                bb_std=bb_stds[i],
+                atr_val=atr_vals[i],
+                in_window=in_window[i],
+                is_flatten=is_flatten[i],
+                ema_val=ema_arr[i],
+            )
+
+            if not had_position and self.position is not None:
+                entries_arr[i] = True
+            if result is not None:
+                exits_arr[i] = True
+
+        return (
+            pd.Series(entries_arr, index=df.index),
+            pd.Series(exits_arr, index=df.index),
+        )
 
     # ── Vectorized Signal Generation (for VectorBT backtesting) ──────────
 
@@ -546,3 +933,140 @@ class MESMeanReversionStrategy:
         )
 
         return pd.Series(long_entries, index=df.index), pd.Series(short_entries, index=df.index)
+
+
+# ── Precomputation for Grid Search ──────────────────────────────────────
+
+
+def precompute_indicators(
+    df: pd.DataFrame,
+    vix_series: Optional[pd.Series] = None,
+    bb_periods: Optional[List[int]] = None,
+    ema_periods: Optional[List[int]] = None,
+    atr_period: int = 14,
+    trade_start: Tuple[int, int] = (10, 0),
+    trade_end: Tuple[int, int] = (14, 0),
+    flatten_time: Tuple[int, int] = (15, 55),
+) -> Dict:
+    """Pre-compute all indicators shared across a parameter grid.
+
+    Computes VWAP, ATR, BB (for each period), EMA (for each period),
+    time masks, and VIX arrays once, avoiding redundant work across
+    grid search combos.
+
+    Args:
+        df: OHLCV DataFrame with DatetimeIndex
+        vix_series: Optional daily VIX values indexed by date
+        bb_periods: List of BB periods to precompute (default [20])
+        ema_periods: List of EMA periods to precompute for trend filter
+        atr_period: ATR period (default 14)
+        trade_start: (hour, minute) trading window start
+        trade_end: (hour, minute) trading window end
+        flatten_time: (hour, minute) flatten time
+
+    Returns:
+        Dict of precomputed arrays for generate_signals_fast()
+    """
+    if bb_periods is None:
+        bb_periods = [20]
+    if ema_periods is None:
+        ema_periods = []
+
+    n = len(df)
+    highs = df["high"].values.astype(np.float64)
+    lows = df["low"].values.astype(np.float64)
+    closes = df["close"].values.astype(np.float64)
+    volumes = df["volume"].values.astype(np.int64)
+
+    # Vectorized timestamp handling via pandas
+    idx = df.index
+    if idx.tz is None:
+        et_index = idx.tz_localize(ET)
+    else:
+        et_index = idx.tz_convert(ET)
+
+    # Time masks — vectorized
+    hours = et_index.hour
+    minutes = et_index.minute
+    bar_minutes = hours * 60 + minutes
+    start_minutes = trade_start[0] * 60 + trade_start[1]
+    end_minutes = trade_end[0] * 60 + trade_end[1]
+    flatten_minutes = flatten_time[0] * 60 + flatten_time[1]
+    in_window = np.asarray((bar_minutes >= start_minutes) & (bar_minutes < end_minutes))
+    is_flatten = np.asarray(bar_minutes >= flatten_minutes)
+
+    # Convert to Python datetimes for VWAP session reset logic
+    timestamps = et_index.to_pydatetime()
+
+    # VIX per bar — vectorized via date mapping
+    vix_per_bar = np.full(n, 20.0)
+    if vix_series is not None:
+        bar_dates = et_index.date
+        vix_dict = vix_series.to_dict()
+        current_vix = 20.0
+        for i in range(n):
+            d = bar_dates[i]
+            if d in vix_dict:
+                current_vix = float(vix_dict[d])
+            vix_per_bar[i] = current_vix
+
+    # VWAP (session-resetting, must be incremental)
+    vwap_vals = np.full(n, np.nan)
+    vwap_stds = np.full(n, np.nan)
+    vwap_ind = VWAP(num_std_bands=2)
+    for i in range(n):
+        v = vwap_ind.update(timestamps[i], highs[i], lows[i], closes[i], int(volumes[i]))
+        vwap_vals[i] = v["vwap"]
+        vwap_stds[i] = v["std"]
+
+    # ATR
+    atr_vals = np.full(n, np.nan)
+    atr_ind = ATR(period=atr_period)
+    for i in range(n):
+        a = atr_ind.update(highs[i], lows[i], closes[i])
+        if a is not None:
+            atr_vals[i] = a
+
+    # BB for each period (mean and std separately)
+    bb_means: Dict[int, np.ndarray] = {}
+    bb_stds: Dict[int, np.ndarray] = {}
+    for period in bb_periods:
+        means = np.full(n, np.nan)
+        stds = np.full(n, np.nan)
+        bb_ind = BollingerBands(period=period, num_std=1.0)
+        for i in range(n):
+            result = bb_ind.update(closes[i])
+            if result is not None:
+                means[i] = result["middle"]
+                stds[i] = result["upper"] - result["middle"]
+        bb_means[period] = means
+        bb_stds[period] = stds
+
+    # EMA for each period (trend filter)
+    ema_vals: Dict[int, np.ndarray] = {}
+    if ema_periods:
+        from indicators.ema import EMA as EMAIndicator
+        for period in ema_periods:
+            if period <= 0:
+                continue
+            vals = np.full(n, np.nan)
+            ema_ind = EMAIndicator(period=period)
+            for i in range(n):
+                result = ema_ind.update(closes[i])
+                if result is not None:
+                    vals[i] = result
+            ema_vals[period] = vals
+
+    return {
+        "timestamps": timestamps,
+        "closes": closes,
+        "vix_per_bar": vix_per_bar,
+        "vwap_vals": vwap_vals,
+        "vwap_stds": vwap_stds,
+        "bb_means": bb_means,
+        "bb_stds": bb_stds,
+        "atr_vals": atr_vals,
+        "in_window": in_window,
+        "is_flatten": is_flatten,
+        "ema_vals": ema_vals,
+    }

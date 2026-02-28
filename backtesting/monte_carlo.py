@@ -78,10 +78,13 @@ class MonteCarloSimulator:
 
             equity_paths[i] = equity
             final_equities[i] = equity[-1]
-            max_drawdowns[i] = max_drawdown(equity)
+
+            # For drawdown/Sharpe, clamp equity floor to avoid div-by-zero
+            equity_clamped = np.maximum(equity, 1.0)
+            max_drawdowns[i] = max_drawdown(equity_clamped)
 
             # Convert to daily-like returns for Sharpe
-            returns = np.diff(equity) / equity[:-1]
+            returns = np.diff(equity_clamped) / equity_clamped[:-1]
             returns = returns[np.isfinite(returns)]
             sharpes[i] = annualized_sharpe(returns) if len(returns) > 1 else 0.0
 
@@ -107,11 +110,14 @@ class MonteCarloSimulator:
             sharpe_pcts[50],
         )
 
+        prob_positive = float(np.sum(final_equities > initial_capital) / self.n_paths)
+
         return {
             "equity_paths": equity_paths,
             "final_equity_pcts": final_eq_pcts,
             "max_drawdown_pcts": mdd_pcts,
             "sharpe_pcts": sharpe_pcts,
+            "prob_positive": prob_positive,
             "summary": summary,
             "n_paths": self.n_paths,
             "n_trades": n_trades,
@@ -126,6 +132,7 @@ class MonteCarloSimulator:
             "final_equity_pcts": empty_pcts,
             "max_drawdown_pcts": zero_pcts,
             "sharpe_pcts": zero_pcts,
+            "prob_positive": 0.0,
             "summary": pd.DataFrame({
                 "percentile": pct_levels,
                 "final_equity": [initial_capital] * 5,
