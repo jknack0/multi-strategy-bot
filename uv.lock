@@ -582,7 +582,6 @@ dependencies = [
     { name = "ib-insync" },
     { name = "numpy" },
     { name = "pandas" },
-    { name = "polygon-api-client" },
     { name = "psycopg2-binary" },
     { name = "python-dotenv" },
     { name = "pytz" },
@@ -606,7 +605,6 @@ requires-dist = [
     { name = "ib-insync", specifier = ">=0.9.86" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pandas", specifier = ">=2.0.0" },
-    { name = "polygon-api-client", specifier = ">=1.12.0" },
     { name = "psycopg2-binary", specifier = ">=2.9.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
@@ -1259,20 +1257,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
-]
-
-[[package]]
-name = "polygon-api-client"
-version = "1.16.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "certifi" },
-    { name = "urllib3" },
-    { name = "websockets" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/9a/c6/f552a630041f5d9b60d3bf7736db54969648c4c0938cb6ff45abe1bd16ec/polygon_api_client-1.16.3.tar.gz", hash = "sha256:df575ff6a4a7636cc92272803749adca7e81d2340af493c51a19fe75b51530fc", size = 44077, upload-time = "2025-10-30T14:39:25.445Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1c/5e/a7121fd1ba43ec8672c0fb481e119ea9dede5f0ba6016f45f272e49c6de5/polygon_api_client-1.16.3-py3-none-any.whl", hash = "sha256:4dec9e27fb5d17a36aacd9372d1df30af2f2b7639b4166ca10d2d48d128d2cd8", size = 61992, upload-time = "2025-10-30T14:39:24.134Z" },
 ]
 
 [[package]]

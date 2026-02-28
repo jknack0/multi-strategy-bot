@@ -20,16 +20,13 @@ docker-compose up -d
 
 # 5. Run tests
 uv run pytest -v
-
-# 6. Fetch historical data (requires Polygon API key)
-uv run python -c "from data.polygon_fetcher import PolygonFetcher; PolygonFetcher().fetch_and_store()"
 ```
 
 ## Project Structure
 
 ```
 config/          Configuration and instrument constants
-data/            Data connectors (IB, Polygon, QuestDB, aggregator)
+data/            Data connectors (IB, QuestDB, aggregator)
 indicators/      Technical indicators (VWAP, Bollinger, ATR, VIX regime)
 backtesting/     Backtesting engine, CPCV validation, Monte Carlo simulation
 strategies/      Trading strategies (Sprint 1-3)

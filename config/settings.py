@@ -21,12 +21,6 @@ IB_CLIENT_ID: int = int(os.getenv("IB_CLIENT_ID", "1"))
 IB_TIMEOUT: int = int(os.getenv("IB_TIMEOUT", "30"))
 IB_READONLY: bool = os.getenv("IB_READONLY", "False").lower() == "true"
 
-# ── Polygon.io ───────────────────────────────────────────────────────────────
-POLYGON_API_KEY: str = os.getenv("POLYGON_API_KEY", "")
-POLYGON_BASE_URL: str = "https://api.polygon.io"
-POLYGON_RATE_LIMIT_CALLS: int = int(os.getenv("POLYGON_RATE_LIMIT_CALLS", "200"))
-POLYGON_RATE_LIMIT_PERIOD: float = float(os.getenv("POLYGON_RATE_LIMIT_PERIOD", "60.0"))
-
 # ── QuestDB ──────────────────────────────────────────────────────────────────
 QUESTDB_HOST: str = os.getenv("QUESTDB_HOST", "127.0.0.1")
 QUESTDB_ILP_PORT: int = int(os.getenv("QUESTDB_ILP_PORT", "9009"))
