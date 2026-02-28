@@ -5,21 +5,24 @@ Multi-strategy intraday trading system for MES (Micro E-mini S&P 500) futures.
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+# 1. Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Copy and configure environment
+# 2. Install all dependencies (creates .venv automatically)
+uv sync --all-extras
+
+# 3. Copy and configure environment
 cp .env.example .env
 # Edit .env with your API keys
 
-# 3. Start QuestDB
+# 4. Start QuestDB
 docker-compose up -d
 
-# 4. Run tests
-pytest tests/ -v
+# 5. Run tests
+uv run pytest -v
 
-# 5. Fetch historical data (requires Polygon API key)
-python -c "from data.polygon_fetcher import PolygonFetcher; PolygonFetcher().fetch_and_store()"
+# 6. Fetch historical data (requires Polygon API key)
+uv run python -c "from data.polygon_fetcher import PolygonFetcher; PolygonFetcher().fetch_and_store()"
 ```
 
 ## Project Structure
@@ -39,7 +42,7 @@ tests/           Test suite
 ## Testing
 
 ```bash
-pytest tests/ -v
-pytest tests/test_indicators.py -v    # Indicator tests only
-pytest tests/test_cpcv.py -v          # CPCV validation tests
+uv run pytest -v
+uv run pytest tests/test_indicators.py -v    # Indicator tests only
+uv run pytest tests/test_cpcv.py -v          # CPCV validation tests
 ```
