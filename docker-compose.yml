@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  questdb:
+    image: questdb/questdb:latest
+    container_name: intraday-questdb
+    restart: unless-stopped
+    ports:
+      - "9000:9000"   # HTTP / Web Console
+      - "9009:9009"   # InfluxDB Line Protocol
+      - "8812:8812"   # PostgreSQL wire protocol
+    volumes:
+      - questdb-data:/var/lib/questdb
+    environment:
+      - QDB_LOG_W_STDOUT_LEVEL=ERROR
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/status || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  questdb-data:
+    driver: local
