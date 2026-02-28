@@ -1,0 +1,6 @@
+{
+  "or_width_min_atr_fraction": 0.4,
+  "volume_threshold": 2.0,
+  "stop_or_multiplier": 0.75,
+  "target_or_multiplier": 1.5
+}
