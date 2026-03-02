@@ -15,7 +15,7 @@ import pandas as pd
 from data.questdb_client import QuestDBClient
 
 
-def fetch_vix(start: str = "2025-02-01", end: str = "2026-03-01") -> pd.DataFrame:
+def fetch_vix(start: str = "2010-01-01", end: str = "2026-03-01") -> pd.DataFrame:
     """Download VIX daily OHLCV from Yahoo Finance."""
     raw = yf.download("^VIX", start=start, end=end, progress=False)
     if raw.empty:

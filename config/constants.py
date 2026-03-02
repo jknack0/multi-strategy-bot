@@ -38,7 +38,7 @@ MES = InstrumentSpec(
     commission_round_trip=1.24,
     slippage_model_ticks=0.25,          # conservative: 0.25 ticks per side
     total_backtest_cost_per_trade=1.87,  # (0.25*1.25*2) + (0.62*2) = $0.625 + $1.24
-    margin=2455.0,                      # IB intraday margin
+    margin=50.0,                        # NinjaTrader intraday margin
     overnight_margin=2455.0,
     exchange="CME",
     currency="USD",

@@ -428,48 +428,71 @@ class VIXAdaptiveORBStrategy:
         Returns:
             DataFrame with columns: signal, or_high, or_low, or_width, or_duration
         """
+        return self.generate_signals_fast(df, vix_series)
+
+    def generate_signals_fast(
+        self,
+        df: pd.DataFrame,
+        vix_series: Optional[pd.Series] = None,
+    ) -> pd.DataFrame:
+        """Fast bar-by-bar backtest using pre-extracted numpy arrays.
+
+        Same semantics as generate_signals but avoids df.iloc[] per bar.
+        """
         self.reset()
         n = len(df)
 
-        signals = np.zeros(n, dtype=int)
-        or_highs = np.full(n, np.nan)
-        or_lows = np.full(n, np.nan)
-        or_widths = np.full(n, np.nan)
-        or_durations = np.zeros(n, dtype=int)
+        # Pre-extract to numpy arrays (avoids iloc overhead)
+        opens = df["open"].values.astype(np.float64)
+        highs = df["high"].values.astype(np.float64)
+        lows = df["low"].values.astype(np.float64)
+        closes = df["close"].values.astype(np.float64)
+        volumes = df["volume"].values.astype(np.int64)
 
-        vix_dict = vix_series.to_dict() if vix_series is not None else {}
-
-        for i in range(n):
-            ts = df.index[i]
+        # Pre-convert timestamps to tz-aware datetimes
+        raw_index = df.index
+        timestamps: List[datetime] = []
+        for ts in raw_index:
             if not isinstance(ts, datetime):
                 ts = pd.Timestamp(ts).to_pydatetime()
             if ts.tzinfo is None:
                 ts = ET.localize(ts)
+            timestamps.append(ts)
 
-            # Update VIX
-            d = ts.date() if hasattr(ts, "date") else ts
-            if d in vix_dict:
-                self.set_vix(float(vix_dict[d]))
+        # Pre-build VIX lookup by date
+        vix_dict = vix_series.to_dict() if vix_series is not None else {}
+
+        signals = np.zeros(n, dtype=np.int8)
+        or_highs = np.full(n, np.nan)
+        or_lows = np.full(n, np.nan)
+        or_widths = np.full(n, np.nan)
+        or_durations = np.zeros(n, dtype=np.int16)
+
+        prev_date = None
+        for i in range(n):
+            ts = timestamps[i]
+
+            # Update VIX only on date change
+            d = ts.date()
+            if d != prev_date:
+                prev_date = d
+                if d in vix_dict:
+                    self.set_vix(float(vix_dict[d]))
 
             had_position = self.position is not None
 
             result = self.on_bar(
                 timestamp=ts,
-                open_=float(df.iloc[i]["open"]),
-                high=float(df.iloc[i]["high"]),
-                low=float(df.iloc[i]["low"]),
-                close=float(df.iloc[i]["close"]),
-                volume=int(df.iloc[i]["volume"]),
+                open_=opens[i],
+                high=highs[i],
+                low=lows[i],
+                close=closes[i],
+                volume=int(volumes[i]),
             )
 
-            # Record signals
             if not had_position and self.position is not None:
                 signals[i] = 1 if self.position.side == Side.LONG else -1
-            if result is not None:
-                # Exit happened on this bar
-                pass
 
-            # Record OR state
             if self._or_high is not None:
                 or_highs[i] = self._or_high
             if self._or_low is not None:
@@ -478,12 +501,10 @@ class VIXAdaptiveORBStrategy:
                 or_widths[i] = self._or_width
             or_durations[i] = self._or_duration_minutes
 
-        result_df = pd.DataFrame({
+        return pd.DataFrame({
             "signal": signals,
             "or_high": or_highs,
             "or_low": or_lows,
             "or_width": or_widths,
             "or_duration": or_durations,
         }, index=df.index)
-
-        return result_df

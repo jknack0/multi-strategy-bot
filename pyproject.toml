@@ -16,6 +16,9 @@ dependencies = [
     "pytz>=2023.3",
     "statsmodels>=0.14.0",
     "yfinance>=1.2.0",
+    "pyarrow>=23.0.1",
+    "supabase>=2.0.0",
+    "databento>=0.40.0",
 ]
 
 [project.optional-dependencies]

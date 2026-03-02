@@ -1,8 +1,8 @@
 """
-Strategy A: MES Bollinger/VWAP Mean Reversion.
+Strategy A: MES Bollinger/VWAP Mean Reversion (Long Only).
 
-Trades MES 5-min bars during RTH, entering when price touches Bollinger
-lower/upper band AND deviates from session VWAP.  Exits at VWAP cross,
+Trades MES 1-min bars during RTH, entering long when price touches
+Bollinger lower band AND deviates below session VWAP.  Exits at target,
 ATR-based stop, or time stop at 3:55 PM ET.
 """
 
@@ -20,6 +20,7 @@ import pandas as pd
 import pytz
 
 from config.constants import INSTRUMENTS, InstrumentSpec, VIXRegime
+from indicators.adx import ADX
 from indicators.atr import ATR
 from indicators.bollinger import BollingerBands
 from indicators.vix_regime import VIXRegimeClassifier
@@ -31,7 +32,6 @@ ET = pytz.timezone("US/Eastern")
 
 class Side(Enum):
     LONG = "LONG"
-    SHORT = "SHORT"
 
 
 @dataclass
@@ -71,15 +71,15 @@ class MESMeanReversionStrategy:
 
     DEFAULT_PARAMS: Dict = {
         "symbol": "MES",
-        "bar_size": "5min",
-        "bb_period": 20,
-        "bb_sigma": 2.0,
+        "bar_size": "1min",
+        "bb_period": 25,
+        "bb_sigma": 1.5,
         "atr_period": 14,
         "atr_stop_multiplier": 3.5,
         "vwap_deviation_entry": 1.0,
         "trade_start_hour": 10,
         "trade_start_minute": 0,
-        "trade_end_hour": 14,
+        "trade_end_hour": 13,
         "trade_end_minute": 0,
         "flatten_hour": 15,
         "flatten_minute": 55,
@@ -90,16 +90,20 @@ class MESMeanReversionStrategy:
         # Trend filter: 0 = disabled, >0 = EMA period
         "trend_ema_period": 0,
         # Partial TP: fraction of entry-to-VWAP distance (1.0 = full VWAP)
-        "take_profit_pct": 1.0,
+        "take_profit_pct": 0.5,
         # Trailing stop: 0.0 = legacy breakeven, >0 = trail at factor * max_favorable
-        "trailing_stop_factor": 0.6,
+        "trailing_stop_factor": 0.0,
         # R:R filter: skip entries with reward/risk below this (0.0 = no filter)
         "min_rr_ratio": 0.0,
+        # ADX regime filter (0 = disabled)
+        # adx_threshold: ADX above this => no entry (gate) or zero size (sizing)
+        # adx_sizing: False = binary gate, True = linear size scaling
+        "adx_period": 14,
+        "adx_threshold": 0.0,
+        "adx_sizing": False,
         # Daily risk limits: 0 = unlimited
         "max_daily_losses": 0,
         "max_daily_loss_dollars": 0.0,
-        # Long only mode: skip all short entries
-        "long_only": False,
     }
 
     def __init__(self, params: Optional[Dict] = None, capital: float = 10000.0) -> None:
@@ -124,6 +128,9 @@ class MESMeanReversionStrategy:
         if self.params["trend_ema_period"] > 0:
             from indicators.ema import EMA
             self._ema = EMA(period=self.params["trend_ema_period"])
+
+        # ADX for regime filter
+        self._adx = ADX(period=self.params["adx_period"]) if self.params["adx_threshold"] > 0 else None
 
         # State
         self.position: Optional[Position] = None
@@ -165,6 +172,7 @@ class MESMeanReversionStrategy:
             self._ema = EMA(period=self.params["trend_ema_period"])
         else:
             self._ema = None
+        self._adx = ADX(period=self.params["adx_period"]) if self.params["adx_threshold"] > 0 else None
         self.position = None
         self.trades = []
         self._current_vix = 20.0
@@ -256,6 +264,7 @@ class MESMeanReversionStrategy:
         bb_data = self._bb.update(close)
         atr_val = self._atr.update(high, low, close)
         ema_val = self._ema.update(close) if self._ema is not None else None
+        adx_val = self._adx.update(high, low, close) if self._adx is not None else None
 
         # Daily risk reset
         current_date = self._to_et(timestamp).date()
@@ -265,15 +274,9 @@ class MESMeanReversionStrategy:
             self._daily_halted = False
         self._last_trade_date = current_date
 
-        # Time stop: flatten at 3:55 PM ET (only losing/flat positions)
+        # Time stop: flatten ALL positions at 3:55 PM ET
         if self._is_flatten_time(timestamp) and self.position is not None:
-            pos = self.position
-            if pos.side == Side.LONG:
-                unrealized = close - pos.entry_price
-            else:
-                unrealized = pos.entry_price - close
-            if unrealized <= 0:
-                return self._close_position(close, timestamp, "time_stop")
+            return self._close_position(close, timestamp, "time_stop")
 
         # Manage existing position
         if self.position is not None:
@@ -316,7 +319,15 @@ class MESMeanReversionStrategy:
         min_rr = self.params["min_rr_ratio"]
         trend_period = self.params["trend_ema_period"]
 
-        # LONG signal
+        # ADX regime filter
+        adx_threshold = self.params["adx_threshold"]
+        if adx_threshold > 0 and adx_val is not None:
+            if adx_val > adx_threshold:
+                return None
+            if self.params["adx_sizing"]:
+                pos_scale *= max(0.0, (adx_threshold - adx_val) / adx_threshold)
+
+        # LONG signal: price at/below lower BB and below VWAP - deviation
         if close <= bb_lower and close < vwap_val - vwap_dev * vwap_std:
             # Trend filter: skip longs in downtrend
             if trend_period > 0 and ema_val is not None and close < ema_val:
@@ -338,31 +349,6 @@ class MESMeanReversionStrategy:
                     atr_at_entry=atr_val,
                     target_price=target_price,
                 )
-            return None
-
-        # SHORT signal
-        if not self.params.get("long_only", False):
-            if close >= bb_upper and close > vwap_val + vwap_dev * vwap_std:
-                # Trend filter: skip shorts in uptrend
-                if trend_period > 0 and ema_val is not None and close > ema_val:
-                    return None
-                target_price = close - tp_pct * (close - vwap_val)
-                if min_rr > 0 and stop_dist > 0:
-                    rr = (close - target_price) / stop_dist
-                    if rr < min_rr:
-                        return None
-                contracts = self.compute_position_size(stop_dist, pos_scale)
-                if contracts > 0 and self.position is None:
-                    self.position = Position(
-                        side=Side.SHORT,
-                        entry_price=close,
-                        entry_time=timestamp,
-                        contracts=contracts,
-                        stop_price=close + stop_dist,
-                        atr_at_entry=atr_val,
-                        target_price=target_price,
-                    )
-                return None
 
         return None
 
@@ -403,58 +389,33 @@ class MESMeanReversionStrategy:
         pos = self.position
         trailing_factor = self.params["trailing_stop_factor"]
 
-        if pos.side == Side.LONG:
-            unrealized = close - pos.entry_price
+        unrealized = close - pos.entry_price
 
-            # Stop loss
-            if close <= pos.stop_price:
-                return self._close_position(close, timestamp, "stop_loss")
-            # Take profit at target
-            if pos.target_price > 0 and close >= pos.target_price:
-                return self._close_position(close, timestamp, "take_profit")
+        # Stop loss
+        if close <= pos.stop_price:
+            return self._close_position(close, timestamp, "stop_loss")
+        # Take profit at target
+        if pos.target_price > 0 and close >= pos.target_price:
+            return self._close_position(close, timestamp, "take_profit")
 
-            # Track max favorable excursion
-            if unrealized > pos.max_favorable:
-                pos.max_favorable = unrealized
+        # Track max favorable excursion
+        if unrealized > pos.max_favorable:
+            pos.max_favorable = unrealized
 
-            # Trailing stop logic
-            if trailing_factor > 0.0 and atr_val is not None:
-                activation = self.params["breakeven_atr_mult"] * pos.atr_at_entry
-                if pos.max_favorable >= activation:
-                    pos.trailing_active = True
-                    new_stop = pos.entry_price + trailing_factor * pos.max_favorable
-                    if new_stop > pos.stop_price:
-                        pos.stop_price = new_stop
-            elif not pos.breakeven_moved and atr_val is not None:
-                # Legacy breakeven logic
-                be_threshold = self.params["breakeven_atr_mult"] * pos.atr_at_entry
-                if unrealized >= be_threshold:
-                    pos.stop_price = pos.entry_price
-                    pos.breakeven_moved = True
-
-        else:  # SHORT
-            unrealized = pos.entry_price - close
-
-            if close >= pos.stop_price:
-                return self._close_position(close, timestamp, "stop_loss")
-            if pos.target_price > 0 and close <= pos.target_price:
-                return self._close_position(close, timestamp, "take_profit")
-
-            if unrealized > pos.max_favorable:
-                pos.max_favorable = unrealized
-
-            if trailing_factor > 0.0 and atr_val is not None:
-                activation = self.params["breakeven_atr_mult"] * pos.atr_at_entry
-                if pos.max_favorable >= activation:
-                    pos.trailing_active = True
-                    new_stop = pos.entry_price - trailing_factor * pos.max_favorable
-                    if new_stop < pos.stop_price:
-                        pos.stop_price = new_stop
-            elif not pos.breakeven_moved and atr_val is not None:
-                be_threshold = self.params["breakeven_atr_mult"] * pos.atr_at_entry
-                if unrealized >= be_threshold:
-                    pos.stop_price = pos.entry_price
-                    pos.breakeven_moved = True
+        # Trailing stop logic
+        if trailing_factor > 0.0 and atr_val is not None:
+            activation = self.params["breakeven_atr_mult"] * pos.atr_at_entry
+            if pos.max_favorable >= activation:
+                pos.trailing_active = True
+                new_stop = pos.entry_price + trailing_factor * pos.max_favorable
+                if new_stop > pos.stop_price:
+                    pos.stop_price = new_stop
+        elif not pos.breakeven_moved and atr_val is not None:
+            # Legacy breakeven logic
+            be_threshold = self.params["breakeven_atr_mult"] * pos.atr_at_entry
+            if unrealized >= be_threshold:
+                pos.stop_price = pos.entry_price
+                pos.breakeven_moved = True
 
         return None
 
@@ -462,10 +423,7 @@ class MESMeanReversionStrategy:
         self, exit_price: float, exit_time: datetime, reason: str
     ) -> TradeRecord:
         pos = self.position
-        if pos.side == Side.LONG:
-            pnl_per_contract = (exit_price - pos.entry_price) * self.spec.point_value
-        else:
-            pnl_per_contract = (pos.entry_price - exit_price) * self.spec.point_value
+        pnl_per_contract = (exit_price - pos.entry_price) * self.spec.point_value
         total_pnl = pnl_per_contract * pos.contracts
 
         record = TradeRecord(
@@ -509,6 +467,7 @@ class MESMeanReversionStrategy:
         in_window: bool,
         is_flatten: bool,
         ema_val: float = float("nan"),
+        adx_val: float = float("nan"),
     ) -> Optional[TradeRecord]:
         """Process a bar using pre-computed indicator values.
 
@@ -523,15 +482,9 @@ class MESMeanReversionStrategy:
             self._daily_halted = False
         self._last_trade_date = current_date
 
-        # Time stop: flatten losing/flat positions at 3:55 PM ET
+        # Time stop: flatten ALL positions at 3:55 PM ET
         if is_flatten and self.position is not None:
-            pos = self.position
-            if pos.side == Side.LONG:
-                unrealized = close - pos.entry_price
-            else:
-                unrealized = pos.entry_price - close
-            if unrealized <= 0:
-                return self._close_position(close, timestamp, "time_stop")
+            return self._close_position(close, timestamp, "time_stop")
 
         # Manage existing position
         if self.position is not None:
@@ -570,6 +523,14 @@ class MESMeanReversionStrategy:
         min_rr = self.params["min_rr_ratio"]
         trend_period = self.params["trend_ema_period"]
 
+        # ADX regime filter
+        adx_threshold = self.params["adx_threshold"]
+        if adx_threshold > 0 and not np.isnan(adx_val):
+            if adx_val > adx_threshold:
+                return None
+            if self.params["adx_sizing"]:
+                pos_scale *= max(0.0, (adx_threshold - adx_val) / adx_threshold)
+
         # LONG signal
         if close <= bb_lower and close < vwap_val - vwap_dev * vwap_std:
             # Trend filter: skip longs in downtrend
@@ -592,29 +553,6 @@ class MESMeanReversionStrategy:
                     target_price=target_price,
                 )
             return None
-
-        # SHORT signal
-        if not self.params.get("long_only", False):
-            if close >= bb_upper and close > vwap_val + vwap_dev * vwap_std:
-                if trend_period > 0 and not np.isnan(ema_val) and close > ema_val:
-                    return None
-                target_price = close - tp_pct * (close - vwap_val)
-                if min_rr > 0 and stop_dist > 0:
-                    rr = (close - target_price) / stop_dist
-                    if rr < min_rr:
-                        return None
-                contracts = self.compute_position_size(stop_dist, pos_scale)
-                if contracts > 0 and self.position is None:
-                    self.position = Position(
-                        side=Side.SHORT,
-                        entry_price=close,
-                        entry_time=timestamp,
-                        contracts=contracts,
-                        stop_price=close + stop_dist,
-                        atr_at_entry=atr_val,
-                        target_price=target_price,
-                    )
-                return None
 
         return None
 
@@ -730,6 +668,9 @@ class MESMeanReversionStrategy:
         else:
             ema_arr = np.full(n, np.nan)
 
+        # ADX values for regime filter
+        adx_arr = precomputed.get("adx_vals", np.full(n, np.nan))
+
         entries_arr = np.zeros(n, dtype=bool)
         exits_arr = np.zeros(n, dtype=bool)
 
@@ -748,6 +689,7 @@ class MESMeanReversionStrategy:
                 in_window=in_window[i],
                 is_flatten=is_flatten[i],
                 ema_val=ema_arr[i],
+                adx_val=adx_arr[i],
             )
 
             if not had_position and self.position is not None:
@@ -830,7 +772,7 @@ class MESMeanReversionStrategy:
         CPCV validation should use generate_signals() for accuracy.
 
         Returns:
-            (long_entries, short_entries) boolean Series
+            (long_entries, no_entries) boolean Series — second is always False
         """
         closes = df["close"].values
         highs = df["high"].values
@@ -924,15 +866,9 @@ class MESMeanReversionStrategy:
             & (closes < vwap_vals - vwap_dev * vwap_stds)
         )
 
-        short_entries = (
-            ready
-            & time_mask
-            & vix_mask
-            & (closes >= adj_upper)
-            & (closes > vwap_vals + vwap_dev * vwap_stds)
-        )
+        no_entries = np.zeros(n, dtype=bool)
 
-        return pd.Series(long_entries, index=df.index), pd.Series(short_entries, index=df.index)
+        return pd.Series(long_entries, index=df.index), pd.Series(no_entries, index=df.index)
 
 
 # ── Precomputation for Grid Search ──────────────────────────────────────
@@ -1057,6 +993,14 @@ def precompute_indicators(
                     vals[i] = result
             ema_vals[period] = vals
 
+    # ADX for regime filter
+    adx_vals = np.full(n, np.nan)
+    adx_ind = ADX(period=atr_period)  # Use same period as ATR (typically 14)
+    for i in range(n):
+        result = adx_ind.update(highs[i], lows[i], closes[i])
+        if result is not None:
+            adx_vals[i] = result
+
     return {
         "timestamps": timestamps,
         "closes": closes,
@@ -1069,4 +1013,5 @@ def precompute_indicators(
         "in_window": in_window,
         "is_flatten": is_flatten,
         "ema_vals": ema_vals,
+        "adx_vals": adx_vals,
     }

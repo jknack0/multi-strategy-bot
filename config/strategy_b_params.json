@@ -1,6 +1,9 @@
 {
   "or_width_min_atr_fraction": 0.4,
-  "volume_threshold": 2.0,
-  "stop_or_multiplier": 0.75,
-  "target_or_multiplier": 1.5
+  "volume_threshold": 0.0,
+  "stop_or_multiplier": 0.3,
+  "target_or_multiplier": 0.75,
+  "trail_trigger_or": 0.75,
+  "max_entry_hour": 14,
+  "max_entry_minute": 0
 }

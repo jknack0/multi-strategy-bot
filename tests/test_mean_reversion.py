@@ -258,9 +258,9 @@ class TestPositionSizing:
         # stop_dist = 5.0 points, point_value = 5.0
         # raw = 100 / (5.0 * 5.0) = 4.0
         # scaled = floor(4.0 * 1.0) = 4
-        # margin cap = 10000 * 0.50 / 2455 = 2
+        # margin cap = 10000 * 0.50 / 50 = 100 (not binding)
         contracts = strat.compute_position_size(5.0, 1.0)
-        assert contracts == 2  # margin-capped
+        assert contracts == 4  # risk-based (margin not binding with $50 NT margin)
 
     def test_sizing_with_scale(self):
         """Position scale of 0.5 should halve contracts."""
@@ -281,11 +281,11 @@ class TestPositionSizing:
     def test_margin_cap(self):
         """Contracts should not exceed 50% of margin capacity."""
         strat = MESMeanReversionStrategy(capital=10_000.0)
-        # margin cap = 10000 * 0.50 / 2455 = 2
+        # margin cap = 10000 * 0.50 / 50 = 100 (NT $50 margin)
         # With very small stop: raw = 100 / (0.01 * 5.0) = 2000
-        # Should be capped at 2
+        # Should be capped at 100
         contracts = strat.compute_position_size(0.01, 1.0)
-        assert contracts == 2  # margin cap
+        assert contracts == 100  # margin cap
 
     def test_zero_stop_returns_zero(self):
         strat = MESMeanReversionStrategy(capital=10_000.0)
@@ -407,43 +407,6 @@ class TestExitLogic:
         assert result.exit_reason == "take_profit"
         assert result.pnl > 0
 
-    def test_short_stop_loss(self):
-        strat = MESMeanReversionStrategy(capital=10_000.0)
-        ts = ET.localize(datetime(2024, 3, 1, 11, 0))
-
-        strat.position = Position(
-            side=Side.SHORT,
-            entry_price=4510.0,
-            entry_time=ts,
-            contracts=1,
-            stop_price=4520.0,
-            atr_at_entry=5.0,
-        )
-
-        vwap_data = {"vwap": 4500.0, "std": 2.0}
-        result = strat._manage_position(4521.0, ts + timedelta(minutes=5), vwap_data, 5.0)
-        assert result is not None
-        assert result.exit_reason == "stop_loss"
-
-    def test_short_take_profit(self):
-        strat = MESMeanReversionStrategy(capital=10_000.0)
-        ts = ET.localize(datetime(2024, 3, 1, 11, 0))
-
-        strat.position = Position(
-            side=Side.SHORT,
-            entry_price=4510.0,
-            entry_time=ts,
-            contracts=1,
-            stop_price=4520.0,
-            atr_at_entry=5.0,
-            target_price=4500.0,
-        )
-
-        vwap_data = {"vwap": 4500.0, "std": 2.0}
-        result = strat._manage_position(4499.0, ts + timedelta(minutes=10), vwap_data, 5.0)
-        assert result is not None
-        assert result.exit_reason == "take_profit"
-
     def test_time_stop_flattens_position(self):
         """Position should be closed at 3:55 PM ET."""
         df = _make_long_entry_scenario()
@@ -466,7 +429,10 @@ class TestExitLogic:
 
     def test_trailing_stop_activated(self):
         """Trailing stop should activate and ratchet up after favorable excursion."""
-        strat = MESMeanReversionStrategy(capital=10_000.0)
+        strat = MESMeanReversionStrategy(
+            params={"trailing_stop_factor": 0.6},
+            capital=10_000.0,
+        )
         ts = ET.localize(datetime(2024, 3, 1, 11, 0))
 
         strat.position = Position(
@@ -516,7 +482,7 @@ class TestParameterPersistence:
         """Unspecified params should retain defaults."""
         strat = MESMeanReversionStrategy(params={"bb_period": 30})
         assert strat.params["bb_period"] == 30
-        assert strat.params["bb_sigma"] == 2.0  # Default
+        assert strat.params["bb_sigma"] == 1.5  # Default
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -574,24 +540,6 @@ class TestTradePnL:
         record = strat._close_position(4505.0, ts + timedelta(minutes=30), "take_profit")
         # PnL = (4505 - 4500) * 5.0 * 2 = 50.0
         expected = (4505.0 - 4500.0) * 5.0 * 2
-        assert record.pnl == pytest.approx(expected, abs=1e-6)
-
-    def test_short_pnl_calculation(self):
-        strat = MESMeanReversionStrategy(capital=10_000.0)
-        ts = ET.localize(datetime(2024, 3, 1, 11, 0))
-
-        strat.position = Position(
-            side=Side.SHORT,
-            entry_price=4510.0,
-            entry_time=ts,
-            contracts=3,
-            stop_price=4520.0,
-            atr_at_entry=5.0,
-        )
-
-        record = strat._close_position(4500.0, ts + timedelta(minutes=30), "take_profit")
-        # PnL = (4510 - 4500) * 5.0 * 3 = 150.0
-        expected = (4510.0 - 4500.0) * 5.0 * 3
         assert record.pnl == pytest.approx(expected, abs=1e-6)
 
     def test_capital_updates_on_close(self):

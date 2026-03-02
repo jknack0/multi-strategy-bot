@@ -8,3 +8,5 @@ dist/
 build/
 .ipynb_checkpoints/
 .venv/
+data/*.parquet
+outputs/

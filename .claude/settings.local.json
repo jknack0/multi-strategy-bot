@@ -5,7 +5,25 @@
       "Bash(uv run pytest:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(python -c \":*)",
+      "Bash(curl -s -G \"http://127.0.0.1:9000/exec\" --data-urlencode \"query=SELECT timestamp_floor\\(''d'', timestamp\\) as day, count\\(\\) as rth_bars FROM ohlcv WHERE symbol=''MES'' AND bar_size=''1min'' AND \\(\\(hour\\(timestamp\\) = 14 AND minute\\(timestamp\\) >= 30\\) OR \\(hour\\(timestamp\\) >= 15 AND hour\\(timestamp\\) <= 20\\)\\) AND dayofweek\\(timestamp\\) >= 1 AND dayofweek\\(timestamp\\) <= 5 GROUP BY day HAVING count\\(\\) <> 390 ORDER BY day\")",
+      "Bash(curl -s -G \"http://127.0.0.1:9000/exec\" --data-urlencode \"query=SELECT * FROM \\(SELECT timestamp_floor\\(''d'', timestamp\\) as day, count\\(\\) as rth_bars FROM ohlcv WHERE symbol=''MES'' AND bar_size=''1min'' AND \\(\\(hour\\(timestamp\\) = 14 AND minute\\(timestamp\\) >= 30\\) OR \\(hour\\(timestamp\\) >= 15 AND hour\\(timestamp\\) <= 20\\)\\) AND dayofweek\\(timestamp\\) >= 1 AND dayofweek\\(timestamp\\) <= 5 GROUP BY day\\) WHERE rth_bars <> 390 ORDER BY day\")",
+      "Bash(curl -s -G \"http://127.0.0.1:9000/exec\" --data-urlencode \"query=SELECT count\\(DISTINCT timestamp_floor\\(''d'', timestamp\\)\\) as trading_days FROM ohlcv WHERE symbol=''MES'' AND bar_size=''1min'' AND \\(\\(hour\\(timestamp\\) = 14 AND minute\\(timestamp\\) >= 30\\) OR \\(hour\\(timestamp\\) >= 15 AND hour\\(timestamp\\) <= 20\\)\\) AND dayofweek\\(timestamp\\) >= 1 AND dayofweek\\(timestamp\\) <= 5\")",
+      "Bash(curl -s -G \"http://127.0.0.1:9000/exec\" --data-urlencode \"query=SELECT count\\(\\) as trading_days FROM \\(SELECT timestamp_floor\\(''d'', timestamp\\) as day FROM ohlcv WHERE symbol=''MES'' AND bar_size=''1min'' AND \\(\\(hour\\(timestamp\\) = 14 AND minute\\(timestamp\\) >= 30\\) OR \\(hour\\(timestamp\\) >= 15 AND hour\\(timestamp\\) <= 20\\)\\) AND dayofweek\\(timestamp\\) >= 1 AND dayofweek\\(timestamp\\) <= 5 GROUP BY day\\)\")",
+      "Bash(curl -s -G \"http://127.0.0.1:9000/exec\" --data-urlencode \"query=SELECT count\\(\\) as summer_rth_days FROM \\(SELECT timestamp_floor\\(''d'', timestamp\\) as day, count\\(\\) as rth_bars FROM ohlcv WHERE symbol=''MES'' AND bar_size=''1min'' AND \\(\\(hour\\(timestamp\\) = 13 AND minute\\(timestamp\\) >= 30\\) OR \\(hour\\(timestamp\\) >= 14 AND hour\\(timestamp\\) <= 19\\)\\) GROUP BY day\\) WHERE rth_bars = 390\")",
+      "Bash(curl -s -G \"http://127.0.0.1:9000/exec\" --data-urlencode \"query=SELECT count\\(\\) as winter_rth_days FROM \\(SELECT timestamp_floor\\(''d'', timestamp\\) as day, count\\(\\) as rth_bars FROM ohlcv WHERE symbol=''MES'' AND bar_size=''1min'' AND \\(\\(hour\\(timestamp\\) = 14 AND minute\\(timestamp\\) >= 30\\) OR \\(hour\\(timestamp\\) >= 15 AND hour\\(timestamp\\) <= 20\\)\\) GROUP BY day\\) WHERE rth_bars = 390\")",
+      "Bash(curl -s -G \"http://127.0.0.1:9000/exec\" --data-urlencode \"query=SELECT count\\(\\) as total_rth_days FROM \\(SELECT timestamp_floor\\(''d'', timestamp\\) as day, count\\(\\) as bars FROM ohlcv WHERE symbol=''MES'' AND bar_size=''1min'' AND \\(\\(hour\\(timestamp\\) = 13 AND minute\\(timestamp\\) >= 30\\) OR \\(hour\\(timestamp\\) = 14 AND minute\\(timestamp\\) >= 30\\) OR \\(hour\\(timestamp\\) >= 14 AND hour\\(timestamp\\) <= 20\\)\\) GROUP BY day\\) WHERE bars >= 390\")",
+      "Bash(curl -s -G \"http://127.0.0.1:9000/exec\" --data-urlencode \"query=SELECT count\\(\\) as total_days FROM \\(SELECT timestamp_floor\\(''d'', timestamp\\) as day, count\\(\\) as bars FROM ohlcv WHERE symbol=''MES'' AND bar_size=''1min'' GROUP BY day\\)\")",
+      "Bash(curl -s -G \"http://127.0.0.1:9000/exec\" --data-urlencode \"query=SELECT count\\(\\) as bars, min\\(timestamp\\) as earliest, max\\(timestamp\\) as latest FROM ohlcv WHERE symbol=''VIX''\")",
+      "Bash(uv run python notebooks/07_strategy_b_backtest.py --bar-size 1min)",
+      "Bash(tasklist)",
+      "Bash(uv run python -c \":*)",
+      "WebFetch(domain:databento.com)",
+      "Bash(uv run python notebooks/03_parameter_optimization.py)",
+      "Bash(uv run python scripts/fetch_vix.py)",
+      "Bash(wmic process where \"processid=90552 or processid=94056\" get ProcessId,UserModeTime /format:csv)",
+      "Bash(wmic process where \"processid=90552 or processid=94056\" get ProcessId /format:csv)"
     ]
   }
 }

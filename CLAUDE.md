@@ -26,6 +26,13 @@ uv run ruff check .
 
 # Start QuestDB (required for data storage/queries)
 docker-compose up -d
+
+# Sync local parquet data to Supabase (bulk historical backfill)
+uv run python scripts/sync_market_data.py data/MES_1min.parquet --symbol MES --timeframe 1m
+
+# EOD sync: push today's QuestDB bars to Supabase (run after market close)
+uv run python scripts/eod_sync.py
+uv run python scripts/eod_sync.py --date 2026-02-28 --days 5
 ```
 
 ## Architecture
@@ -33,6 +40,7 @@ docker-compose up -d
 ### Data Pipeline
 - **QuestDB** (`data/questdb_client.py`) stores bars via ILP ingestion (port 9009) and queries via PostgreSQL wire protocol (port 8812). Table: `ohlcv`, partitioned by month with dedup on (timestamp, symbol, bar_size)
 - **BarAggregator** (`data/aggregator.py`) converts real-time 5-second bars into 1-min and 5-min bars with callback-based emission. Handles futures session boundaries (18:00 ET) and VWAP reset (9:30 ET)
+- **Supabase** (`data/supabase_client.py`) analytics warehouse for historical market data, trade history, and performance snapshots. Write-mostly layer for dashboards and model training. Tables: `market_data`, `strategies`, `trades`, `round_trips`, `strategy_snapshots`
 
 ### Strategy Pattern
 All strategies follow the same event-driven interface:
@@ -63,6 +71,27 @@ All indicators are stateful, incremental (call `.update()` per bar), and return 
 - `config/constants.py`: Instrument specs (MES/ES/MNQ tick sizes, margins, costs), market session times (US/Eastern), VIX regime thresholds and parameter adjustments
 - `config/settings.py`: Environment-loaded settings (API keys, connection strings, backtest defaults) via `.env`
 - `config/strategy_*_params.json`: Serialized strategy parameter overrides
+
+### Supabase Schema
+Tables in the analytics warehouse (Supabase). The Python client uses `service_role` key to bypass RLS.
+
+- **`market_data`**: OHLCV bars partitioned by timeframe (`1s`, `1m`, `5m`, `15m`, `1h`, `1d`). PK: `(symbol, timeframe, open_time)`. Columns: `open`, `high`, `low`, `close` (double precision), `volume`, `vwap`, `trade_count`, `source`
+- **`market_data_l1`**: Level 1 tick data. PK: `(symbol, ts)`. Columns: `bid`, `ask`, `bid_size`, `ask_size`, `last_price`, `last_size`, `source`
+- **`dollar_bars`**: Variable-length dollar bars. Unique on `(symbol, bar_index)`. Includes `dollar_value`, `threshold`, `buy_volume`, `sell_volume`
+- **`strategies`**: Strategy registry. PK: `id` (text, e.g. `bb_vwap_mr_v1`, `orb_vix_v1`). Columns: `name`, `version`, `config` (jsonb), `status` (`active`/`paper`/`retired`)
+- **`model_artifacts`**: Trained model params (HMM, BOCPD, PCA). FK to `strategies(id)`. Columns: `model_type`, `artifact` (jsonb), `metrics` (jsonb), `is_active`
+- **`regime_predictions`**: HMM/BOCPD regime output. Unique on `(symbol, bar_index)`. Columns: `regime_name`, `prob_mean_rev`, `prob_trending`, `prob_volatile`, `confidence`, `bocpd_cp_prob`
+- **`signals`**: Strategy signals. FK to `strategies(id)`. Columns: `direction`, `strength`, `entry_price`, `stop_loss`, `profit_target`, `regime`, `features` (jsonb)
+- **`trades`**: Individual executions. FK to `strategies(id)` and optional FK to `signals(id)`. Columns: `side` (`buy`/`sell`), `quantity`, `price`, `commission` (numeric), `executed_at`, `broker`
+- **`round_trips`**: Entry+exit pairs. FK to `strategies(id)`, `trades(id)` for entry/exit. Columns: `direction`, `entry_price`, `exit_price`, `gross_pnl`, `net_pnl`, `hold_duration` (interval), `exit_reason`, `max_adverse`, `max_favorable`
+- **`strategy_snapshots`**: Daily performance snapshots. Unique on `(strategy_id, snapshot_date, symbol)`. Columns: `sharpe`, `sortino`, `max_drawdown`, `profit_factor`, `win_rate`, `total_trades`, `avg_pnl`
+- **`walk_forward_results`**: Walk-forward validation runs. FK to `strategies(id)`. Columns: `n_windows`, `sharpe_mean`, `is_passing`, `window_details` (jsonb)
+
+### Live Execution
+- **LiveRunner** (`execution/live_runner.py`): Paper trading orchestrator. Streams 1-min bars from Databento, feeds both strategies, tracks PnL internally, persists to QuestDB/Supabase
+- **DatabentoLiveConnector** (`data/databento_live.py`): Subscribes to `GLBX.MDP3` / `MES.FUT` / `ohlcv-1m`, dispatches `(timestamp, o, h, l, c, v)` callbacks
+- Strategy IDs for Supabase: `bb_vwap_mr_v1` (Strategy A), `orb_vix_v1` (Strategy B)
+- Graceful degradation: QuestDB and Supabase failures don't crash the runner
 
 ## Key Conventions
 

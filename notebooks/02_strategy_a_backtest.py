@@ -124,7 +124,7 @@ def main(use_synthetic: bool = False, bar_size: str = "5min") -> dict:
             df = generate_synthetic_ohlcv()
             vix_series = generate_synthetic_vix(df)
 
-    print(f"Data range: {df.index[0]} → {df.index[-1]}")
+    print(f"Data range: {df.index[0]} -> {df.index[-1]}")
     print(f"Total bars: {len(df)}")
 
     # 2. Generate signals via event-driven strategy
